@@ -10,3 +10,11 @@ client.once("ready", () => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+// Servidor Express para mantener vivo el bot
+const express = require("express");
+const app = express();
+
+app.get("/", (_, res) => res.send("OK")); // Ruta principal para probar
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🌐 Servidor activo en Render");
+});
