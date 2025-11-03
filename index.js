@@ -1,5 +1,5 @@
-// index.js — NAZA.fx BOT (Render) — Whop ↔ Discord (OAuth2) + Supabase PRO
-// Requiere: discord.js v14, express, dotenv, node-fetch, body-parser, jsonwebtoken, @supabase/supabase-js
+// index.js — NAZA.fx BOT (Render) — Whop ↔ Discord (OAuth2) + Supabase PRO + Dedupe + Email
+// Requiere: discord.js v14, express, dotenv, body-parser, jsonwebtoken, @supabase/supabase-js, node-fetch, nodemailer
 
 require('dotenv').config();
 
@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const nodemailer = require('nodemailer');
 
 // ================== Supabase (persistencia PRO) ==================
 const supabase = createClient(
@@ -45,6 +46,30 @@ async function claimAlreadyUsed(membership_id, jti) {
   if (error.code === '23505') return true; // PK duplicada → ya usado
   console.log('supabase claimAlreadyUsed error:', error.message);
   return true; // ante error raro, bloquear
+}
+
+// ===== Dedupe de webhooks (Whop) + logs =====
+function getEventIdFromWhop(body) {
+  const candidates = [
+    body?.id,
+    body?.event_id,
+    body?.eventId,
+    body?.data?.id,
+    body?.data?.payment_id,
+    body?.data?.membership_id
+  ].filter(Boolean);
+  if (candidates.length > 0) return String(candidates[0]);
+  return crypto.createHash('sha256').update(JSON.stringify(body || {})).digest('hex');
+}
+
+async function ensureEventNotProcessedAndLog({ event_id, event_type, body }) {
+  const { error } = await supabase
+    .from('webhook_logs')
+    .insert({ event_id, event_type, data: body || null });
+  if (!error) return { isDuplicate: false };
+  if (error.code === '23505') return { isDuplicate: true }; // unique_violation
+  console.log('supabase webhook_logs insert error:', error.message);
+  return { isDuplicate: true, error };
 }
 
 // ================== Discord client ==================
@@ -136,16 +161,52 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
   }
 }
 
-// (Placeholder) Enviar email: reemplaza por Resend/SendGrid cuando quieras
+// ================== Email (Gmail con App Password) ==================
+const mailer = (process.env.GMAIL_USER && process.env.GMAIL_PASS)
+  ? nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS }
+    })
+  : null;
+
 async function sendEmail(to, { subject, html }) {
-  console.log('📧 [FAKE EMAIL] →', to, '|', subject, '|', html);
+  if (!mailer) {
+    console.log('📧 [FAKE EMAIL] →', to, '|', subject, '|', html);
+    return;
+  }
+  try {
+    const info = await mailer.sendMail({
+      from: process.env.FROM_EMAIL || process.env.GMAIL_USER,
+      to,
+      subject,
+      html
+    });
+    console.log('📧 Email enviado:', info.messageId, '→', to);
+  } catch (e) {
+    console.log('❌ Error enviando email:', e?.message || e);
+  }
 }
 
 // ================== Servidor Express ==================
 const app = express();
-app.use(bodyParser.json({ type: '*/*' }));
+
+// Guardamos el rawBody para (opcional) verificar firma de Whop
+const rawBodySaver = (req, res, buf) => { req.rawBody = buf };
+app.use(bodyParser.json({ type: '*/*', verify: rawBodySaver }));
 
 app.get('/', (_req, res) => res.status(200).send('NAZA.fx BOT up ✔'));
+
+// 🔐 (Opcional PRO) Verificación de firma Whop (si configuras WHOP_SIGNING_SECRET)
+function verifyWhopSignature(req) {
+  const secret = process.env.WHOP_SIGNING_SECRET;
+  if (!secret) return true; // sin secreto → no bloquees (modo dev)
+  const signature = req.get('Whop-Signature') || req.get('X-Whop-Signature');
+  if (!signature) return false;
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(req.rawBody || Buffer.from(''));
+  const expected = hmac.digest('hex');
+  return expected === signature;
+}
 
 // 🔒 middleware: exige claim en /discord/login
 function requireClaim(req, res, next) {
@@ -272,10 +333,28 @@ function newClaim({ membership_id, whop_user_id }) {
 
 app.post('/webhook/whop', async (req, res) => {
   try {
+    // (Opcional) firma Whop
+    if (!verifyWhopSignature(req)) {
+      console.log('⛔ Firma de Whop inválida');
+      return res.status(401).json({ error: 'invalid_signature' });
+    }
+
     const body = req.body || {};
     const action = body?.action || body?.event;
-    const email = body?.data?.user?.email || body?.data?.email || null;
 
+    // 🧱 Anti-duplicados por event_id
+    const event_id = getEventIdFromWhop(body);
+    const dedupe = await ensureEventNotProcessedAndLog({
+      event_id,
+      event_type: action || 'unknown',
+      body
+    });
+    if (dedupe.isDuplicate) {
+      console.log('🚫 Webhook duplicado ignorado. event_id=', event_id, 'action=', action);
+      return res.status(200).json({ status: 'duplicate_ignored' });
+    }
+
+    const email = body?.data?.user?.email || body?.data?.email || null;
     const whop_user_id  = body?.data?.user?.id || body?.data?.user_id || null;
     const membership_id = body?.data?.id || body?.data?.membership_id || null;
 
@@ -290,7 +369,9 @@ app.post('/webhook/whop', async (req, res) => {
       }
       if (email && whop_user_id && membership_id) {
         const claim = newClaim({ membership_id, whop_user_id });
-        const base = process.env.SUCCESS_URL || `https://${(process.env.RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
+        const base =
+          process.env.SUCCESS_URL ||
+          `https://${(process.env.RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
         const link = `${base}?claim=${claim}`;
         await sendEmail(email, {
           subject: 'Reclama tu acceso al Discord (NAZA Trading Academy)',
@@ -339,12 +420,21 @@ if (process.env.TEST_MODE === 'true') {
       process.env.JWT_SECRET,
       { expiresIn: '10m' }
     );
-    const link = `${process.env.SUCCESS_URL || `https://${(process.env.RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`}?claim=${claim}`;
+    const base =
+      process.env.SUCCESS_URL ||
+      `https://${(process.env.RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
+    const link = `${base}?claim=${claim}`;
     console.log('🔗 Link de prueba:', link);
     res.status(200).send(`Link de prueba:<br><a href="${link}">${link}</a><br>(expira en 10 minutos)`);
   });
 
   app.get('/test-no-claim', (_req, res) => res.redirect('/discord/login'));
+
+  app.get('/email-test', async (req, res) => {
+    const to = req.query.to || 'tu-correo@ejemplo.com';
+    await sendEmail(to, { subject: 'Prueba NAZA Trading', html: 'Hola 👋 funciona el correo.' });
+    res.send('Enviado (revisa logs y tu inbox)');
+  });
 }
 
 // ====== Arranque del server ======
