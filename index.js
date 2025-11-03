@@ -339,3 +339,22 @@ app.listen(PORT, () => {
 
 // ================== Login del bot ==================
 client.login(process.env.DISCORD_BOT_TOKEN);
+// === Rutas de prueba (solo si TEST_MODE=true) ===
+if (process.env.TEST_MODE === 'true') {
+  // Genera un claim y te muestra el link listo para probar
+  app.get('/test-claim', (req, res) => {
+    const claim = jwt.sign(
+      { membership_id: 'TEST-' + Date.now(), whop_user_id: 'TEST', jti: crypto.randomUUID() },
+      process.env.JWT_SECRET,
+      { expiresIn: '10m' } // expira en 10 min
+    );
+    const link = `${process.env.SUCCESS_URL}?claim=${claim}`;
+    console.log('🔗 Link de prueba:', link);
+    res
+      .status(200)
+      .send(`Link de prueba:<br><a href="${link}">${link}</a><br>(expira en 10 minutos)`);
+  });
+
+  // Para comprobar que /discord/login sin claim está bloqueado
+  app.get('/test-no-claim', (_req, res) => res.redirect('/discord/login'));
+}
