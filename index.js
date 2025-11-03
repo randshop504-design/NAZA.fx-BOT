@@ -1,74 +1,24 @@
-// ===== index.js (PEGA TODO ESTO) =====
-require('dotenv').config();
+app.post('/webhook/whop', express.json(), (req, res) => {
+  try {
+    console.log("📩 Webhook recibido desde Whop:");
+    console.log(req.body); // para ver exactamente qué datos llegan
 
-const { Client, GatewayIntentBits } = require('discord.js');
-const express = require('express');
+    const event = req.body?.event || req.body?.type || "undefined";
+    const email = req.body?.data?.email || req.body?.email || "undefined";
+    const discordId = req.body?.data?.discord_id || req.body?.discord_id || "undefined";
 
-// ----- Discord bot -----
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent // para leer mensajes (!ping)
-  ]
-});
+    console.log(`🧾 Event: ${event}, Email: ${email}, Discord ID: ${discordId}`);
 
-client.once('ready', () => {
-  console.log(`🤖 Bot conectado como ${client.user.tag}`);
-});
+    if (event === "payment_succeeded" || event === "membership_activated") {
+      console.log("✅ Evento válido recibido, procesando...");
+      // Aquí luego asignaremos el rol en Discord automáticamente
+    } else {
+      console.log("⚠️ Evento ignorado:", event);
+    }
 
-client.on('messageCreate', (msg) => {
-  if (msg.author.bot) return;
-  if (msg.content.trim().toLowerCase() === '!ping') {
-    msg.reply('🏓 Pong!');
+    res.status(200).send("OK");
+  } catch (error) {
+    console.error("❌ Error al procesar webhook:", error);
+    res.status(500).send("Internal Server Error");
   }
 });
-
-client.login(process.env.DISCORD_TOKEN);
-
-// ----- Servidor Express / Webhook -----
-const app = express();
-
-// Acepta JSON de Whop (cualquier content-type json)
-app.use(express.json({ type: '*/*' }));
-app.use(express.urlencoded({ extended: true }));
-
-// Health
-app.get('/', (_, res) => res.send('OK'));
-
-// Webhook de Whop
-app.post('/webhook/whop', (req, res) => {
-  const b = req.body || {};
-
-  // v2 usa "type"; v1 usa "event"
-  const event = b.type || b.event || null;
-
-  // posibles rutas de email (v1/v2)
-  const email =
-    b?.data?.user?.email ||
-    b?.data?.customer?.email ||
-    b?.data?.email ||
-    b?.email ||
-    null;
-
-  // si algún día capturamos discord_id como custom field
-  const discordId =
-    b?.data?.custom_fields?.discord_id ||
-    b?.data?.custom_fields?.discordId ||
-    b?.custom_fields?.discord_id ||
-    b?.discord_id ||
-    null;
-
-  console.log('📬 Webhook recibido =>', { event, email, discordId });
-
-  if (event === 'payment_succeeded' || event === 'membership_activated') {
-    return res.status(200).json({ status: 'ok' });
-  }
-
-  return res.status(202).json({ status: 'ignored' });
-});
-
-// Arranque
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🌐 Servidor activo en puerto ${PORT}`));
