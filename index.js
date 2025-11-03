@@ -30,3 +30,14 @@ app.get("/", (_, res) => res.send("Bot activo y funcionando"));
 app.listen(process.env.PORT || 3000, () => {
   console.log("🌐 Servidor activo en Render");
 });
+const express = require("express");
+const app = express();
+app.use(express.json());
+
+app.post("/after-payment", (req, res) => {
+  console.log("✅ Pago recibido:", req.body);
+  res.status(200).send("OK");
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(Servidor activo en puerto ${PORT}));
