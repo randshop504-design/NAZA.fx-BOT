@@ -4,17 +4,14 @@ require('dotenv').config();
 
 const express = require('express');
 const bodyParser = require('body-parser');
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 
-// ===== Discord client =====
+// ================== Discord client ==================
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages],
   partials: [Partials.GuildMember]
 });
 
@@ -22,17 +19,30 @@ client.once('ready', () => {
   console.log('✅ Bot conectado como', client.user.tag);
 });
 
-// ============ Utilidades ============
+// ================== Helpers / “DB” simple en memoria ==================
+// En producción cámbialo por una BD real.
+const links = new Map(); // membership_id -> { discord_id, used_claims: Set<jti> }
 
-// Intenta extraer el Discord ID desde diferentes estructuras de Whop
+function linkGet(mid) { return links.get(mid) || null; }
+function linkSet(mid, discord_id) { links.set(mid, { discord_id, used_claims: new Set() }); }
+function claimAlreadyUsed(mid, jti) {
+  if (!jti) return false; // si por algo no viene, no bloquees; pero idealmente siempre hay jti
+  const rec = links.get(mid) || { discord_id: null, used_claims: new Set() };
+  if (rec.used_claims.has(jti)) return true;
+  rec.used_claims.add(jti);
+  links.set(mid, rec);
+  return false;
+}
+
+// ================== Utilidades Whop / Discord ==================
+
+// Intenta extraer el Discord ID desde diferentes estructuras de Whop (si decides pedirlo)
 function extractDiscordId(payload) {
   let discordId = null;
 
   const v2 = payload?.data?.membership?.custom_fields_responses_v2;
   if (Array.isArray(v2)) {
-    const hit = v2.find(f =>
-      (String(f.label ?? f.question ?? '')).toLowerCase().includes('discord')
-    );
+    const hit = v2.find(f => (String(f.label ?? f.question ?? '')).toLowerCase().includes('discord'));
     if (hit && hit.answer) discordId = String(hit.answer).trim();
   }
 
@@ -54,23 +64,21 @@ function extractDiscordId(payload) {
 
   if (discordId) {
     const onlyDigits = discordId.replace(/\D/g, '');
-    if (onlyDigits.length >= 17 && onlyDigits.length <= 21) {
-      return onlyDigits;
-    }
+    if (onlyDigits.length >= 17 && onlyDigits.length <= 21) return onlyDigits;
   }
   return null;
 }
 
-// Asigna rol por ID si el usuario YA está en el servidor
+// Asignar rol si YA está en el servidor
 async function addRoleIfMember(guildId, roleId, userId) {
   try {
     const guild = await client.guilds.fetch(guildId);
     const member = await guild.members.fetch(userId).catch(() => null);
     if (!member) {
-      console.log('⚠️ Usuario no está en el servidor. No se pudo asignar rol. userId=', userId);
+      console.log('⚠️ Usuario no está en el servidor. userId=', userId);
       return { ok: false, reason: 'not_in_guild' };
     }
-    await member.roles.add(roleId);
+    if (!member.roles.cache.has(roleId)) await member.roles.add(roleId);
     console.log('✅ Rol asignado a', userId);
     return { ok: true };
   } catch (e) {
@@ -79,31 +87,29 @@ async function addRoleIfMember(guildId, roleId, userId) {
   }
 }
 
-// Une al guild usando el access_token del usuario (OAuth2) y asigna rol
+// Auto-join + asignar rol usando el access_token del usuario (OAuth2)
 async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessToken, botToken) {
   try {
+    // Auto-join
     const putRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
       method: 'PUT',
-      headers: {
-        'Authorization': `Bot ${botToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bot ${botToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ access_token: accessToken })
     });
-
-    if (![200, 201, 204].includes(putRes.status)) {
+    if (![201, 204].includes(putRes.status)) {
       const txt = await putRes.text().catch(() => '');
       console.log('⚠️ No se pudo unir al guild. status=', putRes.status, txt);
+      // si ya estaba en el guild, seguirá 204 más abajo
     }
 
-    const patchRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
+    // Rol
+    const roleRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
       method: 'PUT',
       headers: { 'Authorization': `Bot ${botToken}` }
     });
-
-    if (![204].includes(patchRes.status)) {
-      const txt = await patchRes.text().catch(() => '');
-      console.log('⚠️ No se pudo asignar rol tras join. status=', patchRes.status, txt);
+    if (roleRes.status !== 204) {
+      const txt = await roleRes.text().catch(() => '');
+      console.log('⚠️ No se pudo asignar rol tras join. status=', roleRes.status, txt);
       return false;
     }
 
@@ -115,55 +121,47 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
   }
 }
 
-// ============ Servidor Express ============
+// (Placeholder) Enviar email — implementa tu proveedor real (Resend/SendGrid/Mailgun/etc.)
+async function sendEmail(to, { subject, html }) {
+  console.log('📧 [FAKE EMAIL] →', to, '|', subject, '|', html);
+  // TODO: cambiar por integración real de correo.
+}
+
+// ================== Servidor Express ==================
 const app = express();
 app.use(bodyParser.json({ type: '*/*' }));
 
 // Ping básico
-app.get('/', (_req, res) => {
-  res.status(200).send('NAZA.fx BOT up ✔');
-});
+app.get('/', (_req, res) => res.status(200).send('NAZA.fx BOT up ✔'));
 
-// ======= Webhook de Whop =======
-app.post('/webhook/whop', async (req, res) => {
+// 🔒 Middleware: exige claim en /discord/login
+function requireClaim(req, res, next) {
+  const { claim } = req.query || {};
+  if (!claim) return res.status(401).send('🔒 Link inválido. Revisa tu correo de compra para reclamar acceso.');
   try {
-    const body = req.body || {};
-    const action = body?.action || body?.event;
-    const email = body?.data?.email || body?.data?.user?.email || null;
-    const discordId = extractDiscordId(body);
-
-    console.log('📦 Webhook Whop:', { action, email, discordId });
-
-    const okEvents = new Set([
-      'payment_succeeded',
-      'membership_activated',
-      'membership_went_valid'
-    ]);
-
-    if (!okEvents.has(action)) {
-      console.log('ℹ️ Evento ignorado:', action);
-      return res.status(202).json({ status: 'ignored' });
-    }
-
-    if (discordId) {
-      const r = await addRoleIfMember(process.env.GUILD_ID, process.env.ROLE_ID, discordId);
-      if (r.ok) return res.json({ status: 'role_assigned', via: 'discord_id' });
-
-      console.log('👉 Usuario no en guild. Redirigir a /discord/login.');
-      return res.json({ status: 'need_oauth_join', reason: r.reason });
-    }
-
-    return res.json({ status: 'no_discord_id', next: '/discord/login' });
-  } catch (e) {
-    console.error('❌ Error en /webhook/whop:', e?.message || e);
-    return res.status(500).json({ error: 'server_error' });
+    const payload = jwt.verify(claim, process.env.JWT_SECRET); // { whop_user_id, membership_id, jti, iat, exp }
+    req.claim = payload;
+    return next();
+  } catch {
+    return res.status(401).send('⛔ Claim inválido o vencido. Pide un nuevo enlace.');
   }
-});
+}
 
-// ======= OAuth2: iniciar login =======
-app.get('/discord/login', (req, res) => {
+// ======= OAuth2: iniciar (protegido con claim) =======
+app.get('/discord/login', requireClaim, (req, res) => {
   try {
-    const state = jwt.sign({ ts: Date.now() }, process.env.JWT_SECRET, { expiresIn: '10m' });
+    // Pasamos contexto en "state" y lo firmamos
+    const state = jwt.sign(
+      {
+        ts: Date.now(),
+        whop_user_id: req.claim.whop_user_id,
+        membership_id: req.claim.membership_id,
+        jti: req.claim.jti || null
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '10m' }
+    );
+
     const params = new URLSearchParams({
       client_id: process.env.DISCORD_CLIENT_ID,
       redirect_uri: process.env.DISCORD_REDIRECT_URI,
@@ -179,13 +177,14 @@ app.get('/discord/login', (req, res) => {
   }
 });
 
-// ======= OAuth2: callback =======
+// ======= OAuth2: callback (token → user → auto-join → rol) =======
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code) return res.status(400).send('Falta "code"');
-    jwt.verify(state, process.env.JWT_SECRET);
+    const st = jwt.verify(state, process.env.JWT_SECRET); // { membership_id, whop_user_id, jti, ts }
 
+    // 1) Intercambiar code por token
     const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -197,27 +196,39 @@ app.get('/discord/callback', async (req, res) => {
         redirect_uri: process.env.DISCORD_REDIRECT_URI
       })
     });
-
     if (!tokenRes.ok) {
       const txt = await tokenRes.text().catch(() => '');
       console.log('⚠️ token exchange failed:', tokenRes.status, txt);
       return res.status(400).send('⚠️ Error al obtener tokens de Discord.');
     }
-
     const tokens = await tokenRes.json();
     const accessToken = tokens.access_token;
 
+    // 2) Obtener usuario
     const meRes = await fetch('https://discord.com/api/v10/users/@me', {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
-
     if (!meRes.ok) {
       const txt = await meRes.text().catch(() => '');
       console.log('⚠️ users/@me failed:', meRes.status, txt);
       return res.status(400).send('⚠️ Error al leer tu usuario de Discord.');
     }
+    const me = await meRes.json(); // { id, username, ... }
 
-    const me = await meRes.json();
+    // 3) Política de 1 Discord por membresía
+    const existing = linkGet(st.membership_id);
+    if (existing && existing.discord_id && existing.discord_id !== me.id) {
+      return res.status(403).send('⛔ Esta membresía ya está vinculada a otra cuenta de Discord.');
+      // Si prefieres migrar: quita rol al anterior y sigue con el nuevo.
+      // await removeRole(existing.discord_id);
+    }
+
+    // 4) Claim de un solo uso
+    if (claimAlreadyUsed(st.membership_id, st.jti)) {
+      return res.status(409).send('⛔ Este enlace ya fue usado.');
+    }
+
+    // 5) Auto-join + rol
     const ok = await joinGuildAndRoleWithAccessToken(
       process.env.GUILD_ID,
       process.env.ROLE_ID,
@@ -226,22 +237,105 @@ app.get('/discord/callback', async (req, res) => {
       process.env.DISCORD_BOT_TOKEN
     );
 
-    if (ok) {
-      return res.status(200).send('✅ Acceso concedido. Revisa Discord.');
-    } else {
-      return res.status(200).send('⚠️ Te autorizamos, pero no pudimos asignar el rol automáticamente. Contacta soporte con tu ID: ' + me.id);
-    }
+    if (!ok) return res.status(200).send('⚠️ Autorizado, pero no se pudo asignar el rol. Tu ID: ' + me.id);
+
+    // 6) Guardar vínculo si no existía
+    if (!existing || !existing.discord_id) linkSet(st.membership_id, me.id);
+
+    return res.status(200).send('✅ Acceso concedido. Revisa Discord.');
   } catch (e) {
     console.error('❌ Error en /discord/callback:', e?.message || e);
-    return res.status(500).send('⚠️ Error al obtener tokens de Discord.');
+    return res.status(500).send('⚠️ Error al conectar Discord.');
   }
 });
 
-// ====== Arranque del server ======
+// ======= Webhook de Whop =======
+const okEvents = new Set(['payment_succeeded', 'membership_activated', 'membership_went_valid']);
+const cancelEvents = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
+
+function newClaim({ membership_id, whop_user_id }) {
+  return jwt.sign(
+    { membership_id, whop_user_id, jti: crypto.randomUUID() },
+    process.env.JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+}
+
+app.post('/webhook/whop', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const action = body?.action || body?.event;
+    const email = body?.data?.user?.email || body?.data?.email || null;
+
+    const whop_user_id  = body?.data?.user?.id || body?.data?.user_id || null;
+    const membership_id = body?.data?.id || body?.data?.membership_id || null;
+
+    console.log('📦 Webhook Whop:', { action, email, whop_user_id, membership_id });
+
+    // → Activación / pago (incluye renovaciones)
+    if (okEvents.has(action)) {
+      // Si ya está vinculado, opcional: asegurar rol (por si lo perdió)
+      const linked = membership_id ? linkGet(membership_id) : null;
+      if (linked?.discord_id) {
+        await addRoleIfMember(process.env.GUILD_ID, process.env.ROLE_ID, linked.discord_id);
+        return res.json({ status: 'role_ensured' });
+      }
+
+      // Si no está vinculado, generar claim y enviar link
+      if (email && whop_user_id && membership_id) {
+        const claim = newClaim({ membership_id, whop_user_id });
+        const base = process.env.SUCCESS_URL || `https://${process.env.RENDER_EXTERNAL_URL || 'TU-APP.onrender.com'}/discord/login`;
+        const link = `${base}?claim=${claim}`;
+
+        await sendEmail(email, {
+          subject: 'Reclama tu acceso al Discord (NAZA Trading Academy)',
+          html: `Gracias por tu compra 👋<br>Conecta tu Discord y activa tu rol:<br>
+                 <a href="${link}">Reclamar acceso</a><br>
+                 Este enlace expira en 24 horas.`
+        });
+
+        return res.json({ status: 'claim_sent', email });
+      }
+
+      return res.json({ status: 'no_email_or_ids' });
+    }
+
+    // → Cancelación / expiración
+    if (cancelEvents.has(action)) {
+      // Si guardaste el vínculo, quita el rol
+      const linked = membership_id ? linkGet(membership_id) : null;
+      if (linked?.discord_id) {
+        // Quitar rol
+        const url = `https://discord.com/api/v10/guilds/${process.env.GUILD_ID}/members/${linked.discord_id}/roles/${process.env.ROLE_ID}`;
+        const del = await fetch(url, { method: 'DELETE', headers: { 'Authorization': `Bot ${process.env.DISCORD_BOT_TOKEN}` } });
+        if (del.status === 204) console.log('🗑️ Rol revocado por cancelación/expiración:', linked.discord_id);
+      } else {
+        // Fallback: si Whop te mandó el ID directo
+        const discordId = extractDiscordId(body);
+        if (discordId) {
+          const url = `https://discord.com/api/v10/guilds/${process.env.GUILD_ID}/members/${discordId}/roles/${process.env.ROLE_ID}`;
+          await fetch(url, { method: 'DELETE', headers: { 'Authorization': `Bot ${process.env.DISCORD_BOT_TOKEN}` } });
+          console.log('🗑️ Rol revocado (fallback) a', discordId);
+        } else {
+          console.log('ℹ️ Cancelación sin vínculo/ID — no se pudo revocar rol.');
+        }
+      }
+      return res.json({ status: 'role_removed' });
+    }
+
+    // Otros eventos: ignorar
+    return res.status(202).json({ status: 'ignored' });
+  } catch (e) {
+    console.error('❌ Error en /webhook/whop:', e?.message || e);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+// ================== Arranque del server ==================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🟢 Servidor web activo en puerto ${PORT}`);
 });
 
-// ====== Login del bot ======
+// ================== Login del bot ==================
 client.login(process.env.DISCORD_BOT_TOKEN);
