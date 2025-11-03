@@ -131,3 +131,37 @@ app.listen(PORT, () => {
 
 // Login del bot
 client.login(process.env.DISCORD_TOKEN);
+// Ruta de callback de Discord OAuth2
+app.get('/discord/callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    return res.status(400).send('Falta el parámetro "code"');
+  }
+
+  try {
+    const data = new URLSearchParams({
+      client_id: process.env.DISCORD_CLIENT_ID,
+      client_secret: process.env.DISCORD_CLIENT_SECRET,
+      grant_type: 'authorization_code',
+      code: code,
+      redirect_uri: 'https://naza-fx-bot.onrender.com/discord/callback',
+    });
+
+    const response = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      body: data,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+
+    const tokens = await response.json();
+
+    if (tokens.access_token) {
+      res.send('✅ Autorización completada correctamente. Puedes cerrar esta pestaña.');
+    } else {
+      res.send('⚠️ Error al obtener tokens de Discord.');
+    }
+  } catch (error) {
+    console.error('Error en /discord/callback:', error);
+    res.status(500).send('Error interno del servidor.');
+  }
+});
