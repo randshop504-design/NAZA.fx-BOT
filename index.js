@@ -11,20 +11,14 @@ const client = new Client({
 });
 
 client.once("ready", () => {
-  console.log(`✅ Bot conectado como ${client.user.tag}`);
+  console.log(`Bot conectado como ${client.user.tag}`);
 });
 
-// Iniciar sesión en Discord
 client.login(process.env.DISCORD_TOKEN);
 
-// Servidor Express para mantener vivo el bot
+// Ping de vida para Render
 const app = express();
-
-app.get("/", (req, res) => {
-  res.send("OK");
-});
-
-
+app.get("/", (req, res) => res.send("OK"));
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🌐 Servidor activo en Render");
+  console.log("Servidor activo en Render");
 });
