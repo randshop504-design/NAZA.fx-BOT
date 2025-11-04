@@ -1,5 +1,7 @@
-// index.js — NAZA.fx BOT (Render) — Whop ↔ Discord (OAuth2) + Supabase PRO + Dedupe + Email
-// Requiere: discord.js v14, express, dotenv, body-parser, jsonwebtoken, @supabase/supabase-js, node-fetch, nodemailer
+// ==========================
+// NAZA.fx BOT — INDEX FINAL PRO
+// Whop ↔ Render ↔ Discord + Supabase + Gmail + Dedupe + Ping/Pong
+// ==========================
 
 require('dotenv').config();
 
@@ -8,18 +10,48 @@ const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
+// node-fetch@3 es ESM; usamos import dinámico compatible con CJS:
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const nodemailer = require('nodemailer');
 
-// ================== Supabase (persistencia PRO) ==================
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE,
-  { auth: { persistSession: false } }
-);
+const app = express();
 
-// ===== Helpers de persistencia (DB) =====
+// ==========================
+// ENV VARS (asegúrate que todas existen en Render)
+// ==========================
+const {
+  DISCORD_BOT_TOKEN,
+  DISCORD_CLIENT_ID,
+  DISCORD_CLIENT_SECRET,
+  DISCORD_REDIRECT_URI,
+  GUILD_ID,
+  ROLE_ID,
+  JWT_SECRET,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE,
+  RENDER_EXTERNAL_URL,
+  SUCCESS_URL,
+  // Gmail (opcional: si faltan, se hace FAKE EMAIL en logs)
+  GMAIL_USER,
+  GMAIL_PASS,
+  FROM_EMAIL,
+  // Firma de Whop (opcional PRO)
+  WHOP_SIGNING_SECRET,
+  // Enlaces para el correo de bienvenida
+  DISCORD_DOWNLOAD_URL = 'https://discord.com/download',
+  DISCORD_TUTORIAL_URL = 'https://youtu.be/dQw4w9WgXcQ',
+  WHATSAPP_URL = 'https://wa.me/50400000000',
+  TELEGRAM_URL = 'https://t.me/naza_fx',
+  TEST_MODE
+} = process.env;
+
+// ==========================
+// SUPABASE CLIENT
+// ==========================
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
+
+// ===== Helpers de persistencia (DB)
 async function linkGet(membership_id) {
   const { data, error } = await supabase
     .from('membership_links')
@@ -27,7 +59,7 @@ async function linkGet(membership_id) {
     .eq('membership_id', membership_id)
     .maybeSingle();
   if (error) { console.log('supabase linkGet error:', error.message); return null; }
-  return data; // { membership_id, discord_id } | null
+  return data || null;
 }
 
 async function linkSet(membership_id, discord_id) {
@@ -42,15 +74,15 @@ async function claimAlreadyUsed(membership_id, jti) {
   const { error } = await supabase
     .from('claims_used')
     .insert({ jti, membership_id });
-  if (!error) return false;               // insertó → primera vez
-  if (error.code === '23505') return true; // PK duplicada → ya usado
+  if (!error) return false;                // primera vez
+  if (error.code === '23505') return true; // duplicado → ya usado
   console.log('supabase claimAlreadyUsed error:', error.message);
-  return true; // ante error raro, bloquear
+  return true; // por seguridad, bloquea si hay error desconocido
 }
 
-// ===== Dedupe de webhooks (Whop) + logs =====
+// ===== Dedupe de webhooks (Whop) + logs
 function getEventIdFromWhop(body) {
-  const candidates = [
+  const c = [
     body?.id,
     body?.event_id,
     body?.eventId,
@@ -58,7 +90,7 @@ function getEventIdFromWhop(body) {
     body?.data?.payment_id,
     body?.data?.membership_id
   ].filter(Boolean);
-  if (candidates.length > 0) return String(candidates[0]);
+  if (c.length) return String(c[0]);
   return crypto.createHash('sha256').update(JSON.stringify(body || {})).digest('hex');
 }
 
@@ -72,9 +104,16 @@ async function ensureEventNotProcessedAndLog({ event_id, event_type, body }) {
   return { isDuplicate: true, error };
 }
 
-// ================== Discord client ==================
+// ==========================
+// DISCORD CLIENT + Ping/Pong
+// ==========================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent // ← necesario para leer "ping"
+  ],
   partials: [Partials.GuildMember]
 });
 
@@ -82,36 +121,23 @@ client.once('ready', () => {
   console.log('✅ Bot conectado como', client.user.tag);
 });
 
-// ================== Utilidades Whop/Discord ==================
-
-// (Opcional) extraer Discord ID si Whop lo envía como campo personalizado
-function extractDiscordId(payload) {
-  let discordId = null;
-
-  const v2 = payload?.data?.membership?.custom_fields_responses_v2;
-  if (Array.isArray(v2)) {
-    const hit = v2.find(f => (String(f.label ?? f.question ?? '')).toLowerCase().includes('discord'));
-    if (hit && hit.answer) discordId = String(hit.answer).trim();
-  }
-
-  if (!discordId) {
-    const v1 = payload?.data?.custom_fields_responses;
-    if (v1 && typeof v1 === 'object') {
-      for (const [k, v] of Object.entries(v1)) {
-        if (String(k).toLowerCase().includes('discord') && v) { discordId = String(v).trim(); break; }
-      }
+// Ping/Pong simple
+client.on('messageCreate', async (msg) => {
+  try {
+    if (msg.author.bot) return;
+    if (!msg.guild) return;
+    const content = msg.content.trim().toLowerCase();
+    if (content === 'ping' || content === '(ping)') {
+      await msg.reply('pong 🏓');
     }
+  } catch (e) {
+    console.log('Error en messageCreate:', e?.message || e);
   }
+});
 
-  if (!discordId && payload?.data?.discord_id) discordId = String(payload.data.discord_id).trim();
-
-  if (discordId) {
-    const onlyDigits = discordId.replace(/\D/g, '');
-    if (onlyDigits.length >= 17 && onlyDigits.length <= 21) return onlyDigits;
-  }
-  return null;
-}
-
+// ==========================
+// Discord helpers (roles / join)
+// ==========================
 async function addRoleIfMember(guildId, roleId, userId) {
   try {
     const guild = await client.guilds.fetch(guildId);
@@ -161,22 +187,21 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
   }
 }
 
-// ================== Email (Gmail con App Password) ==================
-const mailer = (process.env.GMAIL_USER && process.env.GMAIL_PASS)
-  ? nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS }
-    })
+// ==========================
+// Email (Gmail con App Password) — auto fallback a FAKE
+// ==========================
+const mailer = (GMAIL_USER && GMAIL_PASS)
+  ? nodemailer.createTransport({ service: 'gmail', auth: { user: GMAIL_USER, pass: GMAIL_PASS } })
   : null;
 
 async function sendEmail(to, { subject, html }) {
   if (!mailer) {
-    console.log('📧 [FAKE EMAIL] →', to, '|', subject, '|', html);
+    console.log('📧 [FAKE EMAIL] →', to, '|', subject, '|', html.substring(0, 140) + '...');
     return;
   }
   try {
     const info = await mailer.sendMail({
-      from: process.env.FROM_EMAIL || process.env.GMAIL_USER,
+      from: FROM_EMAIL || GMAIL_USER,
       to,
       subject,
       html
@@ -187,33 +212,81 @@ async function sendEmail(to, { subject, html }) {
   }
 }
 
-// ================== Servidor Express ==================
-const app = express();
+// ==========================
+// Email Template (tu texto exacto)
+// ==========================
+function buildWelcomeEmailHTML({
+  username = 'Trader',
+  claimLink, // ← link con ?claim=...
+  discordDownloadUrl = DISCORD_DOWNLOAD_URL,
+  discordTutorialUrl = DISCORD_TUTORIAL_URL,
+  whatsappUrl = WHATSAPP_URL,
+  telegramUrl = TELEGRAM_URL
+} = {}) {
+  const btn = 'display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;';
+  const p = 'margin:0 0 14px;line-height:1.5;';
+  return `
+  <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:640px;margin:auto;padding:24px">
+    <h2 style="margin:0 0 10px">¡Bienvenido a <span style="white-space:nowrap">NASA Strategic Academy</span>! 🎉</h2>
+    <p style="${p}">Te felicito por dar este paso. Desde hoy formas parte de la comunidad enfocada en <b>libertad, resultados reales y crecimiento constante</b>.</p>
+    <p style="${p}">Aquí encontrarás todo el <b>contenido, clases y señales</b> que te ayudarán a operar con claridad y confianza.</p>
 
-// Guardamos el rawBody para (opcional) verificar firma de Whop
+    <div style="margin:18px 0 8px">
+      <p style="${p}"><b>Nota:</b> Antes de crear tu cuenta en Discord, procura usar el <b>mismo correo</b> con el que realizaste la compra.</p>
+    </div>
+
+    <div style="margin:18px 0">
+      <a href="${discordDownloadUrl}" style="${btn}background:#4f46e5;color:#fff">Descargar Discord</a>
+    </div>
+    <div style="margin:8px 0 20px">
+      <a href="${discordTutorialUrl}" style="${btn}background:#0ea5e9;color:#fff">Ver cómo crear tu cuenta</a>
+    </div>
+
+    <div style="margin:22px 0">
+      <p style="${p}">Si al pagar no conectaste tu Discord, reclámalo aquí:</p>
+      <a href="${claimLink}" style="${btn}background:#16a34a;color:#fff">Acceso al servidor (activar rol)</a>
+      <p style="margin:8px 0 0;color:#6b7280;font-size:12px">Este enlace es <b>de un solo uso</b> y expira automáticamente.</p>
+    </div>
+
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:26px 0" />
+
+    <p style="${p}"><b>Comunidades privadas:</b></p>
+    <p style="${p}">
+      <a href="${telegramUrl}">Telegram</a> ·
+      <a href="${whatsappUrl}">WhatsApp</a>
+    </p>
+
+    <p style="color:#6b7280;font-size:12px;margin-top:20px">Si no solicitaste este acceso, ignora este correo.</p>
+  </div>`;
+}
+
+// ==========================
+// Express middlewares / health
+// ==========================
+
+// Guardamos raw body para (opcional) verificar firma de Whop
 const rawBodySaver = (req, res, buf) => { req.rawBody = buf };
 app.use(bodyParser.json({ type: '*/*', verify: rawBodySaver }));
 
 app.get('/', (_req, res) => res.status(200).send('NAZA.fx BOT up ✔'));
 
-// 🔐 (Opcional PRO) Verificación de firma Whop (si configuras WHOP_SIGNING_SECRET)
+// (Opcional PRO) Verificación de firma Whop
 function verifyWhopSignature(req) {
-  const secret = process.env.WHOP_SIGNING_SECRET;
-  if (!secret) return true; // sin secreto → no bloquees (modo dev)
+  if (!WHOP_SIGNING_SECRET) return true; // sin secreto, no bloqueamos (dev)
   const signature = req.get('Whop-Signature') || req.get('X-Whop-Signature');
   if (!signature) return false;
-  const hmac = crypto.createHmac('sha256', secret);
+  const hmac = crypto.createHmac('sha256', WHOP_SIGNING_SECRET);
   hmac.update(req.rawBody || Buffer.from(''));
   const expected = hmac.digest('hex');
   return expected === signature;
 }
 
-// 🔒 middleware: exige claim en /discord/login
+// ======= OAuth2: iniciar (protegido con claim)
 function requireClaim(req, res, next) {
   const { claim } = req.query || {};
   if (!claim) return res.status(401).send('🔒 Link inválido. Revisa tu correo de compra para reclamar acceso.');
   try {
-    const payload = jwt.verify(claim, process.env.JWT_SECRET); // { whop_user_id, membership_id, jti, iat, exp }
+    const payload = jwt.verify(claim, JWT_SECRET); // { whop_user_id, membership_id, jti, iat, exp }
     req.claim = payload;
     return next();
   } catch {
@@ -221,23 +294,16 @@ function requireClaim(req, res, next) {
   }
 }
 
-// ======= OAuth2: iniciar (protegido con claim) =======
 app.get('/discord/login', requireClaim, (req, res) => {
   try {
     const state = jwt.sign(
-      {
-        ts: Date.now(),
-        whop_user_id: req.claim.whop_user_id,
-        membership_id: req.claim.membership_id,
-        jti: req.claim.jti || null
-      },
-      process.env.JWT_SECRET,
+      { ts: Date.now(), whop_user_id: req.claim.whop_user_id, membership_id: req.claim.membership_id, jti: req.claim.jti || null },
+      JWT_SECRET,
       { expiresIn: '10m' }
     );
-
     const params = new URLSearchParams({
-      client_id: process.env.DISCORD_CLIENT_ID,
-      redirect_uri: process.env.DISCORD_REDIRECT_URI,
+      client_id: DISCORD_CLIENT_ID,
+      redirect_uri: DISCORD_REDIRECT_URI,
       response_type: 'code',
       scope: 'identify guilds.join',
       state
@@ -250,23 +316,23 @@ app.get('/discord/login', requireClaim, (req, res) => {
   }
 });
 
-// ======= OAuth2: callback (token → user → auto-join → rol) =======
+// ======= OAuth2: callback
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code) return res.status(400).send('Falta "code"');
-    const st = jwt.verify(state, process.env.JWT_SECRET); // { membership_id, whop_user_id, jti, ts }
+    const st = jwt.verify(state, JWT_SECRET); // { membership_id, whop_user_id, jti, ts }
 
     // 1) token exchange
     const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        client_id: process.env.DISCORD_CLIENT_ID,
-        client_secret: process.env.DISCORD_CLIENT_SECRET,
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
         grant_type: 'authorization_code',
         code,
-        redirect_uri: process.env.DISCORD_REDIRECT_URI
+        redirect_uri: DISCORD_REDIRECT_URI
       })
     });
     if (!tokenRes.ok) {
@@ -300,13 +366,7 @@ app.get('/discord/callback', async (req, res) => {
     }
 
     // 5) auto-join + rol
-    const ok = await joinGuildAndRoleWithAccessToken(
-      process.env.GUILD_ID,
-      process.env.ROLE_ID,
-      me.id,
-      accessToken,
-      process.env.DISCORD_BOT_TOKEN
-    );
+    const ok = await joinGuildAndRoleWithAccessToken(GUILD_ID, ROLE_ID, me.id, accessToken, DISCORD_BOT_TOKEN);
     if (!ok) return res.status(200).send('⚠️ Autorizado, pero no se pudo asignar el rol. Tu ID: ' + me.id);
 
     // 6) guardar vínculo si no existía
@@ -319,21 +379,17 @@ app.get('/discord/callback', async (req, res) => {
   }
 });
 
-// ======= Webhook de Whop =======
+// ======= Webhook de Whop
 const okEvents = new Set(['payment_succeeded', 'membership_activated', 'membership_went_valid']);
 const cancelEvents = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
 
 function newClaim({ membership_id, whop_user_id }) {
-  return jwt.sign(
-    { membership_id, whop_user_id, jti: crypto.randomUUID() },
-    process.env.JWT_SECRET,
-    { expiresIn: '24h' }
-  );
+  return jwt.sign({ membership_id, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '24h' });
 }
 
 app.post('/webhook/whop', async (req, res) => {
   try {
-    // (Opcional) firma Whop
+    // Firma (opcional)
     if (!verifyWhopSignature(req)) {
       console.log('⛔ Firma de Whop inválida');
       return res.status(401).json({ error: 'invalid_signature' });
@@ -342,13 +398,9 @@ app.post('/webhook/whop', async (req, res) => {
     const body = req.body || {};
     const action = body?.action || body?.event;
 
-    // 🧱 Anti-duplicados por event_id
+    // Anti-duplicados
     const event_id = getEventIdFromWhop(body);
-    const dedupe = await ensureEventNotProcessedAndLog({
-      event_id,
-      event_type: action || 'unknown',
-      body
-    });
+    const dedupe = await ensureEventNotProcessedAndLog({ event_id, event_type: action || 'unknown', body });
     if (dedupe.isDuplicate) {
       console.log('🚫 Webhook duplicado ignorado. event_id=', event_id, 'action=', action);
       return res.status(200).json({ status: 'duplicate_ignored' });
@@ -360,47 +412,43 @@ app.post('/webhook/whop', async (req, res) => {
 
     console.log('📦 Webhook Whop:', { action, email, whop_user_id, membership_id });
 
-    // Activaciones / renovaciones
+    // Altas / renovaciones
     if (okEvents.has(action)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
-        await addRoleIfMember(process.env.GUILD_ID, process.env.ROLE_ID, linked.discord_id);
+        await addRoleIfMember(GUILD_ID, ROLE_ID, linked.discord_id);
         return res.json({ status: 'role_ensured' });
       }
       if (email && whop_user_id && membership_id) {
         const claim = newClaim({ membership_id, whop_user_id });
-        const base =
-          process.env.SUCCESS_URL ||
-          `https://${(process.env.RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
+        const base = SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
         const link = `${base}?claim=${claim}`;
-        await sendEmail(email, {
-          subject: 'Reclama tu acceso al Discord (NAZA Trading Academy)',
-          html: `Gracias por tu compra 👋<br>Conecta tu Discord y activa tu rol:<br>
-                 <a href="${link}">${link}</a><br>
-                 Este enlace expira en 24 horas.`
+
+        const html = buildWelcomeEmailHTML({
+          username: body?.data?.user?.username || body?.data?.user?.name || 'Trader',
+          claimLink: link
         });
+
+        await sendEmail(email, {
+          subject: 'Bienvenido a NASA Strategic Academy — Acceso y pasos (Discord)',
+          html
+        });
+
         console.log('🔗 Link generado para', email, link);
         return res.json({ status: 'claim_sent', email });
       }
       return res.json({ status: 'no_email_or_ids' });
     }
 
-    // Cancelación / expiración
+    // Bajas / expiraciones
     if (cancelEvents.has(action)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
-        const url = `https://discord.com/api/v10/guilds/${process.env.GUILD_ID}/members/${linked.discord_id}/roles/${process.env.ROLE_ID}`;
-        const del = await fetch(url, { method: 'DELETE', headers: { 'Authorization': `Bot ${process.env.DISCORD_BOT_TOKEN}` } });
+        const url = `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${linked.discord_id}/roles/${ROLE_ID}`;
+        const del = await fetch(url, { method: 'DELETE', headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}` } });
         if (del.status === 204) console.log('🗑️ Rol revocado por cancelación/expiración:', linked.discord_id);
       } else {
-        const discordId = extractDiscordId(body);
-        if (discordId) {
-          const url = `https://discord.com/api/v10/guilds/${process.env.GUILD_ID}/members/${discordId}/roles/${process.env.ROLE_ID}`;
-          await fetch(url, { method: 'DELETE', headers: { 'Authorization': `Bot ${process.env.DISCORD_BOT_TOKEN}` } });
-          console.log('🗑️ Rol revocado (fallback) a', discordId);
-        } else {
-          console.log('ℹ️ Cancelación sin vínculo/ID — no se pudo revocar rol.');
-        }
+        console.log('ℹ️ Cancelación sin vínculo — no se pudo revocar rol.');
       }
       return res.json({ status: 'role_removed' });
     }
@@ -412,17 +460,15 @@ app.post('/webhook/whop', async (req, res) => {
   }
 });
 
-// ====== Rutas de prueba (habilita con TEST_MODE=true) ======
-if (process.env.TEST_MODE === 'true') {
+// ====== Rutas de prueba (habilita con TEST_MODE=true)
+if (TEST_MODE === 'true') {
   app.get('/test-claim', (req, res) => {
     const claim = jwt.sign(
       { membership_id: 'TEST-' + Date.now(), whop_user_id: 'TEST', jti: crypto.randomUUID() },
-      process.env.JWT_SECRET,
+      JWT_SECRET,
       { expiresIn: '10m' }
     );
-    const base =
-      process.env.SUCCESS_URL ||
-      `https://${(process.env.RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
+    const base = SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
     const link = `${base}?claim=${claim}`;
     console.log('🔗 Link de prueba:', link);
     res.status(200).send(`Link de prueba:<br><a href="${link}">${link}</a><br>(expira en 10 minutos)`);
@@ -430,18 +476,19 @@ if (process.env.TEST_MODE === 'true') {
 
   app.get('/test-no-claim', (_req, res) => res.redirect('/discord/login'));
 
-  app.get('/email-test', async (req, res) => {
-    const to = req.query.to || 'tu-correo@ejemplo.com';
-    await sendEmail(to, { subject: 'Prueba NAZA Trading', html: 'Hola 👋 funciona el correo.' });
-    res.send('Enviado (revisa logs y tu inbox)');
+  app.get('/email-preview', (req, res) => {
+    const claimLink = `${SUCCESS_URL}?claim=FAKE.TEST.CLAIM`;
+    const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink });
+    res.set('Content-Type', 'text/html').send(html);
   });
 }
 
-// ====== Arranque del server ======
+// ==========================
+// Start server + Login bot
+// ==========================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🟢 Servidor web activo en puerto ${PORT}`);
 });
 
-// ====== Login del bot ======
-client.login(process.env.DISCORD_BOT_TOKEN);
+client.login(DISCORD_BOT_TOKEN);
