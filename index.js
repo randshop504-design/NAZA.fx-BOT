@@ -1,5 +1,5 @@
 // ==========================
-// NAZA.fx BOT — INDEX FINAL PRO (SMTP + Email Preview + Test)
+// NAZA.fx BOT — INDEX FINAL PRO (SMTP STARTTLS + Tests)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail + Dedupe + Ping/Pong
 // ==========================
 
@@ -10,7 +10,6 @@ const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
-// node-fetch@3 es ESM; usamos import dinámico compatible con CJS:
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const nodemailer = require('nodemailer');
@@ -86,8 +85,8 @@ async function claimAlreadyUsed(membership_id, jti) {
   const { error } = await supabase
     .from('claims_used')
     .insert({ jti, membership_id });
-  if (!error) return false;                // primera vez
-  if (error.code === '23505') return true; // duplicado → ya usado
+  if (!error) return false;
+  if (error.code === '23505') return true;
   console.log('supabase claimAlreadyUsed error:', error.message);
   return true;
 }
@@ -193,14 +192,16 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
 }
 
 // ==========================
-// Email (SMTP Gmail) + Template
+// Email (SMTP Gmail STARTTLS) + Template
 // ==========================
 const mailer = (GMAIL_USER && GMAIL_PASS)
   ? nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+      port: 587,          // STARTTLS
+      secure: false,      // TLS explícito
+      requireTLS: true,
+      auth: { user: GMAIL_USER, pass: GMAIL_PASS },
+      tls: { servername: 'smtp.gmail.com' }
     })
   : null;
 
@@ -320,7 +321,7 @@ function requireClaim(req, res, next) {
   const { claim } = req.query || {};
   if (!claim) return res.status(401).send('🔒 Link inválido. Revisa tu correo de compra para reclamar acceso.');
   try {
-    const payload = jwt.verify(claim, JWT_SECRET); // { whop_user_id, membership_id, jti, iat, exp }
+    const payload = jwt.verify(claim, JWT_SECRET);
     req.claim = payload;
     return next();
   } catch {
@@ -507,7 +508,7 @@ if (TEST_MODE === 'true') {
     res.set('Content-Type', 'text/html').send(html);
   });
 
-  // NUEVA: prueba directa de envío
+  // Prueba directa de envío
   app.get('/send-test', async (req, res) => {
     const to = (req.query.to || GMAIL_USER || '').toString();
     if (!to) return res.status(400).send('Falta ?to=');
@@ -515,6 +516,29 @@ if (TEST_MODE === 'true') {
     const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink });
     await sendEmail(to, { subject: `${APP_NAME} — Prueba de correo`, html });
     res.send('OK, correo de prueba enviado (revisa inbox/spam).');
+  });
+
+  // Diagnóstico SMTP: verificar conexión sin enviar
+  app.get('/smtp-verify', async (req, res) => {
+    if (!mailer) return res.status(400).send('Mailer nulo (revisa GMAIL_USER/PASS).');
+    try {
+      const ok = await mailer.verify();
+      return res.status(200).send('SMTP OK: ' + JSON.stringify(ok));
+    } catch (e) {
+      console.log('❌ SMTP verify error:', e?.message || e);
+      return res.status(500).send('SMTP ERROR: ' + (e?.message || e));
+    }
+  });
+
+  // Diagnóstico SMTP: ver configuración (sin exponer pass)
+  app.get('/smtp-debug', (req, res) => {
+    const mask = (s) => (s ? s.replace(/.(?=.{4})/g, '*') : '');
+    res.json({
+      GMAIL_USER,
+      FROM_EMAIL,
+      hasPass: !!GMAIL_PASS,
+      passSample: mask(GMAIL_PASS || '')
+    });
   });
 }
 
