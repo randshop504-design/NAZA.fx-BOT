@@ -235,41 +235,37 @@ function buildWelcomeEmailHTML({
   whatsappUrl = WHATSAPP_URL,
   telegramUrl = TELEGRAM_URL,
   logoUrl = LOGO_URL,
-  footerImageUrl = FOOTER_IMAGE_URL,
-  iconWhatsapp = ICON_WHATSAPP_URL,
-  iconTelegram = ICON_TELEGRAM_URL
+  footerImageUrl = FOOTER_IMAGE_URL
 } = {}) {
-  // estilos reutilizables
   const btn = 'display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;';
   const p = 'margin:0 0 14px;line-height:1.6;';
 
-  // IMPORTANTE: usar bgcolor + estilos inline para forzar tema oscuro en la mayoría de clientes
   return `
   <div style="margin:0;padding:0;background:#0b0f17;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="margin:0;padding:0;background:#0b0f17;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="background:#0b0f17;">
       <tr>
         <td align="center">
-          <table role="presentation" width="680" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="max-width:680px;background:#0b0f17;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+          <table role="presentation" width="680" cellspacing="0" cellpadding="0" style="width:680px;max-width:680px;background:#0b0f17;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
             <tr>
               <td align="center" style="padding:28px 24px 8px;">
-                <img src="${logoUrl}" alt="Logo" width="64" height="64" style="height:64px;width:64px;border-radius:14px;border:1px solid #1f2937;object-fit:cover;display:block"/>
+                <img src="${logoUrl}" alt="Logo" style="height:64px;border-radius:14px;border:1px solid #1f2937;display:block;">
               </td>
             </tr>
             <tr>
               <td align="center" style="padding:0 24px 4px;">
-                <h2 style="margin:6px 0 0;font-size:22px;color:#ffffff">${APP_NAME}</h2>
+                <h2 style="margin:6px 0 0;font-size:22px;color:#ffffff;">NAZA Trading Academy</h2>
               </td>
             </tr>
 
-            <tr><td style="height:10px;line-height:10px;">&nbsp;</td></tr>
+            <tr><td style="height:10px;"></td></tr>
 
             <tr>
-              <td style="padding:0 24px;color:#e5e7eb;">
+              <td style="padding:0 24px;">
                 <p style="${p}">¡Bienvenido, <b>${username}</b>! 🎉 Te felicito por dar este paso. Desde hoy formas parte de la comunidad enfocada en <b>libertad, resultados reales y crecimiento constante</b>.</p>
                 <p style="${p}">Aquí encontrarás todo el <b>contenido, clases y señales</b> que te ayudarán a operar con claridad y confianza.</p>
 
                 <div style="margin:18px 0 8px">
-                  <p style="${p}"><b>Nota importante:</b> Antes de crear tu cuenta en Discord, usa el <b>mismo correo</b> con el que realizaste la compra.</p>
+                  <p style="${p}"><b>Nota importante:</b> usa el <b>mismo correo</b> con el que realizaste la compra al crear tu cuenta de Discord.</p>
                 </div>
 
                 <div style="margin:18px 0">
@@ -281,22 +277,16 @@ function buildWelcomeEmailHTML({
 
                 <div style="margin:22px 0">
                   <p style="${p}">Si al pagar no conectaste tu Discord, reclámalo aquí:</p>
-                  <a href="${claimLink}" style="${btn}background:#16a34a;color:#fff">Acceso al servidor (activar rol)</a>
-                  <p style="margin:8px 0 0;color:#9ca3af;font-size:12px">Este enlace es <b>de un solo uso</b> y expira en <b>24 horas</b>.</p>
+                  <a href="${claimLink}" style="${btn}background:#16a34a;color:#0b0f17">Acceso al servidor (activar rol)</a>
+                  <p style="margin:8px 0 0;color:#9ca3af;font-size:12px">Enlace de un solo uso, expira en <b>24 horas</b>.</p>
                 </div>
 
                 <hr style="border:none;border-top:1px solid #1f2937;margin:26px 0" />
 
                 <p style="${p}"><b>Comunidades privadas</b></p>
-                <div style="margin:10px 0 24px;text-align:center">
-                  <a href="${whatsappUrl}" style="text-decoration:none;margin-right:16px;">
-                    <img src="${iconWhatsapp}" alt="WhatsApp" width="26" height="26" style="vertical-align:middle;margin-right:6px;">
-                    <span style="color:#22c55e;font-weight:700;">WhatsApp</span>
-                  </a>
-                  <a href="${telegramUrl}" style="text-decoration:none;">
-                    <img src="${iconTelegram}" alt="Telegram" width="26" height="26" style="vertical-align:middle;margin-right:6px;">
-                    <span style="color:#8b5cf6;font-weight:700;">Telegram</span>
-                  </a>
+                <div style="margin:10px 0 24px">
+                  <a href="${whatsappUrl}" style="${btn}background:#22c55e;color:#0b0f17;margin-right:8px">WhatsApp</a>
+                  <a href="${telegramUrl}" style="${btn}background:#8b5cf6;color:#0b0f17">Telegram</a>
                 </div>
 
                 <p style="color:#9ca3af;font-size:12px;margin-top:10px">Si no solicitaste este acceso, ignora este correo.</p>
@@ -304,18 +294,16 @@ function buildWelcomeEmailHTML({
             </tr>
 
             <tr>
-              <td style="padding:0">
-                <img src="${footerImageUrl}" alt="Footer" style="width:100%;display:block;max-height:120px;object-fit:cover;opacity:.95"/>
+              <td align="center" style="padding:0;">
+                <img src="${footerImageUrl}" alt="Banner" style="width:100%;max-width:680px;height:auto;display:block;margin:0 auto;object-fit:contain;opacity:.95;border:0;">
               </td>
             </tr>
-
           </table>
         </td>
       </tr>
     </table>
   </div>`;
 }
-
 // ==========================
 // Express middlewares / health
 // ==========================
