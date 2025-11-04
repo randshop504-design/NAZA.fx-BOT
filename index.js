@@ -1,5 +1,5 @@
 // ==========================
-// NAZA.fx BOT — INDEX FINAL PRO (SMTP + Email Preview + Test)
+// NAZA.fx BOT — INDEX FINAL PRO (Dark Email + Icons + STARTTLS + Tests)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail + Dedupe + Ping/Pong
 // ==========================
 
@@ -10,7 +10,6 @@ const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
-// node-fetch@3 es ESM; usamos import dinámico compatible con CJS:
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const nodemailer = require('nodemailer');
@@ -49,7 +48,9 @@ const {
   // Enlaces para el correo de bienvenida
   DISCORD_DOWNLOAD_URL = 'https://discord.com/download',
   DISCORD_TUTORIAL_URL = 'https://youtu.be/_51EAeKtTs0',
-  WHATSAPP_URL = 'https://chat.whatsapp.com/EEgZlswrpjT2Jgv9ZWKgu5?mode=wwt',
+
+  // Comunidades (default al link nuevo; si pones la var en Render, usa la tuya)
+  WHATSAPP_URL = 'https://chat.whatsapp.com/Eslm3r3o7KLLdEbHyEziiB?mode=wwt',
   TELEGRAM_URL = 'https://t.me/NASATRADINGACADEMI',
 
   // Activos visuales (hosteados en Supabase Storage)
@@ -198,14 +199,16 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
 }
 
 // ==========================
-// Email (SMTP Gmail) + Template
+// Email (SMTP Gmail STARTTLS) + Template (Dark Mode)
 // ==========================
 const mailer = (GMAIL_USER && GMAIL_PASS)
   ? nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+      port: 587,          // STARTTLS
+      secure: false,      // TLS explícito
+      requireTLS: true,
+      auth: { user: GMAIL_USER, pass: GMAIL_PASS },
+      tls: { servername: 'smtp.gmail.com' }
     })
   : null;
 
@@ -227,6 +230,7 @@ async function sendEmail(to, { subject, html }) {
   }
 }
 
+// Tema oscuro forzado + íconos + enlaces
 function buildWelcomeEmailHTML({
   username = 'Trader',
   claimLink,
@@ -239,16 +243,34 @@ function buildWelcomeEmailHTML({
   iconWhatsapp = ICON_WHATSAPP_URL,
   iconTelegram = ICON_TELEGRAM_URL
 } = {}) {
-  // estilos reutilizables
   const btn = 'display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;';
   const p = 'margin:0 0 14px;line-height:1.6;';
 
-  // IMPORTANTE: usar bgcolor + estilos inline para forzar tema oscuro en la mayoría de clientes
-  return `
-  <div style="margin:0;padding:0;background:#0b0f17;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="margin:0;padding:0;background:#0b0f17;">
+  return `<!doctype html>
+  <html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="x-apple-disable-message-reformatting">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Fuerza tema oscuro -->
+    <meta name="color-scheme" content="dark">
+    <meta name="supported-color-schemes" content="dark only">
+    <style>
+      u + .body .dark-bg { background:#0b0f17 !important; }
+      u + .body .dark-text { color:#e5e7eb !important; }
+      a { color: inherit; }
+    </style>
+  </head>
+  <body class="body dark-bg" style="margin:0;padding:0;background:#0b0f17;">
+    <!--[if mso]>
+      <v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">
+        <v:fill type="tile" color="#0b0f17"/>
+      </v:background>
+    <![endif]-->
+
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="background:#0b0f17;">
       <tr>
-        <td align="center">
+        <td align="center" bgcolor="#0b0f17" style="background:#0b0f17;">
           <table role="presentation" width="680" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="max-width:680px;background:#0b0f17;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
             <tr>
               <td align="center" style="padding:28px 24px 8px;">
@@ -257,7 +279,7 @@ function buildWelcomeEmailHTML({
             </tr>
             <tr>
               <td align="center" style="padding:0 24px 4px;">
-                <h2 style="margin:6px 0 0;font-size:22px;color:#ffffff">${APP_NAME}</h2>
+                <h2 class="dark-text" style="margin:6px 0 0;font-size:22px;color:#ffffff">${APP_NAME}</h2>
               </td>
             </tr>
 
@@ -308,12 +330,12 @@ function buildWelcomeEmailHTML({
                 <img src="${footerImageUrl}" alt="Footer" style="width:100%;display:block;max-height:120px;object-fit:cover;opacity:.95"/>
               </td>
             </tr>
-
           </table>
         </td>
       </tr>
     </table>
-  </div>`;
+  </body>
+  </html>`;
 }
 
 // ==========================
@@ -446,12 +468,12 @@ app.post('/webhook/whop', async (req, res) => {
     }
 
     const body = req.body || {};
-    an = body?.action || body?.event;
+    const action = body?.action || body?.event;
 
     const event_id = getEventIdFromWhop(body);
-    const dedupe = await ensureEventNotProcessedAndLog({ event_id, event_type: an || 'unknown', body });
+    const dedupe = await ensureEventNotProcessedAndLog({ event_id, event_type: action || 'unknown', body });
     if (dedupe.isDuplicate) {
-      console.log('🚫 Webhook duplicado ignorado. event_id=', event_id, 'action=', an);
+      console.log('🚫 Webhook duplicado ignorado. event_id=', event_id, 'action=', action);
       return res.status(200).json({ status: 'duplicate_ignored' });
     }
 
@@ -459,9 +481,9 @@ app.post('/webhook/whop', async (req, res) => {
     const whop_user_id  = body?.data?.user?.id || body?.data?.user_id || null;
     const membership_id = body?.data?.id || body?.data?.membership_id || null;
 
-    console.log('📦 Webhook Whop:', { action: an, email, whop_user_id, membership_id });
+    console.log('📦 Webhook Whop:', { action, email, whop_user_id, membership_id });
 
-    if (okEvents.has(an)) {
+    if (okEvents.has(action)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
         await addRoleIfMember(GUILD_ID, ROLE_ID, linked.discord_id);
@@ -488,7 +510,7 @@ app.post('/webhook/whop', async (req, res) => {
       return res.json({ status: 'no_email_or_ids' });
     }
 
-    if (cancelEvents.has(an)) {
+    if (cancelEvents.has(action)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
         const url = `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${linked.discord_id}/roles/${ROLE_ID}`;
@@ -523,9 +545,12 @@ if (TEST_MODE === 'true') {
     res.status(200).send(`Link de prueba:<br><a href="${link}">${link}</a><br>(expira en 10 minutos)`);
   });
 
+  // Permite probar override de enlaces por query (?wa=...&tg=...)
   app.get('/email-preview', (req, res) => {
+    const wa = req.query.wa || WHATSAPP_URL;
+    const tg = req.query.tg || TELEGRAM_URL;
     const claimLink = `${SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`}?claim=FAKE.TEST.CLAIM`;
-    const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink });
+    const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink, whatsappUrl: wa, telegramUrl: tg });
     res.set('Content-Type', 'text/html').send(html);
   });
 
@@ -548,6 +573,17 @@ if (TEST_MODE === 'true') {
     } catch (e) {
       res.status(500).send('SMTP ERROR: ' + (e?.message || e));
     }
+  });
+
+  // debug variables (sin exponer contraseña)
+  app.get('/smtp-debug', (req, res) => {
+    const mask = (s) => (s ? s.replace(/.(?=.{4})/g, '*') : '');
+    res.json({
+      GMAIL_USER,
+      FROM_EMAIL,
+      hasPass: !!GMAIL_PASS,
+      passSample: mask(GMAIL_PASS || '')
+    });
   });
 }
 
