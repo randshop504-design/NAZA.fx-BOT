@@ -529,7 +529,29 @@ app.post('/webhook/whop', async (req, res) => {
 });
 
 // ====== Rutas de prueba (habilita con TEST_MODE=true)
-if (TEST_MODE === 'true') {
+if (TEST_MODE === 'true') {  // Enviar un correo de prueba directo
+  app.get('/send-test', async (req, res) => {
+    try {
+      const to = (req.query.to || '').trim();
+      if (!to) return res.status(400).send('Falta ?to=correo@dominio.com');
+
+      const claimLink = `${(SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`)}?claim=FAKE.TEST.CLAIM`;
+      const html = buildWelcomeEmailHTML({
+        username: 'NAZA Tester',
+        claimLink
+      });
+
+      await sendEmail(to, {
+        subject: 'Prueba de correo — NAZA Trading Academy',
+        html
+      });
+
+      return res.status(200).send(`✅ Enviado a ${to}. Revisa tu bandeja y SPAM.`);
+    } catch (e) {
+      console.error('❌ /send-test error:', e?.message || e);
+      return res.status(500).send('Error enviando el correo de prueba.');
+    }
+  });
   app.get('/test-claim', (req, res) => {
     const claim = jwt.sign(
       { membership_id: 'TEST-' + Date.now(), whop_user_id: 'TEST', jti: crypto.randomUUID() },
