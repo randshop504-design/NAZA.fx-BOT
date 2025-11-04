@@ -1,21 +1,19 @@
 {
-  "name": "naza.fx-bot",
+  "name": "naza-fx-bot",
   "version": "1.0.0",
-  "description": "NAZA.fx BOT (Render) — Discord + Whop Integration",
+  "description": "Whop ↔ Render ↔ Discord + Supabase + Email",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.15.3",
-    "express": "^4.19.2",
+    "@supabase/supabase-js": "^1.35.7",
     "body-parser": "^1.20.2",
-    "node-fetch": "^3.3.2",
+    "discord.js": "^14.15.3",
     "dotenv": "^16.4.5",
-    "jsonwebtoken": "^9.0.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "license": "MIT"
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.13"
+  }
 }
