@@ -1,5 +1,5 @@
 // ==========================
-// NAZA.fx BOT — INDEX FINAL PRO (SMTP STARTTLS + Tests)
+// NAZA.fx BOT — INDEX FINAL PRO (SMTP + Email Preview + Test)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail + Dedupe + Ping/Pong
 // ==========================
 
@@ -10,6 +10,7 @@ const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
+// node-fetch@3 es ESM; usamos import dinámico compatible con CJS:
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const nodemailer = require('nodemailer');
@@ -40,7 +41,7 @@ const {
   // Gmail (SMTP)
   GMAIL_USER,
   GMAIL_PASS,
-  FROM_EMAIL, // Ej: NAZA Trading Academy <alexzaldivar693@gmail.com>
+  FROM_EMAIL, // Ej: NAZA Trading Academy <alexzaldivar639@gmail.com>
 
   // Firma de Whop (opcional PRO)
   WHOP_SIGNING_SECRET,
@@ -54,6 +55,10 @@ const {
   // Activos visuales (hosteados en Supabase Storage)
   LOGO_URL = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg',
   FOOTER_IMAGE_URL = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/baner/WhatsApp%20Image%202025-11-03%20at%209.29.04%20PM.jpeg',
+
+  // Íconos (puedes sobreescribir con variables)
+  ICON_WHATSAPP_URL = 'https://cdn-icons-png.flaticon.com/512/733/733585.png',
+  ICON_TELEGRAM_URL = 'https://cdn-icons-png.flaticon.com/512/2111/2111646.png',
 
   TEST_MODE
 } = process.env;
@@ -85,12 +90,13 @@ async function claimAlreadyUsed(membership_id, jti) {
   const { error } = await supabase
     .from('claims_used')
     .insert({ jti, membership_id });
-  if (!error) return false;
-  if (error.code === '23505') return true;
+  if (!error) return false;                // primera vez
+  if (error.code === '23505') return true; // duplicado → ya usado
   console.log('supabase claimAlreadyUsed error:', error.message);
   return true;
 }
 
+// ===== Dedupe de webhooks (Whop) + logs
 function getEventIdFromWhop(body) {
   const c = [
     body?.id,
@@ -109,7 +115,7 @@ async function ensureEventNotProcessedAndLog({ event_id, event_type, body }) {
     .from('webhook_logs')
     .insert({ event_id, event_type, data: body || null });
   if (!error) return { isDuplicate: false };
-  if (error.code === '23505') return { isDuplicate: true };
+  if (error.code === '23505') return { isDuplicate: true }; // unique_violation
   console.log('supabase webhook_logs insert error:', error.message);
   return { isDuplicate: true, error };
 }
@@ -192,16 +198,14 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
 }
 
 // ==========================
-// Email (SMTP Gmail STARTTLS) + Template
+// Email (SMTP Gmail) + Template
 // ==========================
 const mailer = (GMAIL_USER && GMAIL_PASS)
   ? nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 587,          // STARTTLS
-      secure: false,      // TLS explícito
-      requireTLS: true,
-      auth: { user: GMAIL_USER, pass: GMAIL_PASS },
-      tls: { servername: 'smtp.gmail.com' }
+      port: 465,
+      secure: true,
+      auth: { user: GMAIL_USER, pass: GMAIL_PASS }
     })
   : null;
 
@@ -231,64 +235,81 @@ function buildWelcomeEmailHTML({
   whatsappUrl = WHATSAPP_URL,
   telegramUrl = TELEGRAM_URL,
   logoUrl = LOGO_URL,
-  footerImageUrl = FOOTER_IMAGE_URL
+  footerImageUrl = FOOTER_IMAGE_URL,
+  iconWhatsapp = ICON_WHATSAPP_URL,
+  iconTelegram = ICON_TELEGRAM_URL
 } = {}) {
+  // estilos reutilizables
   const btn = 'display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;';
-  const p = 'margin:0 0 14px;line-height:1.55;';
+  const p = 'margin:0 0 14px;line-height:1.6;';
 
+  // IMPORTANTE: usar bgcolor + estilos inline para forzar tema oscuro en la mayoría de clientes
   return `
-  <div style="background:#0b0f17;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:0;margin:0">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px;margin:auto;background:#0b0f17">
+  <div style="margin:0;padding:0;background:#0b0f17;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="margin:0;padding:0;background:#0b0f17;">
       <tr>
-        <td style="padding:28px 24px 8px;text-align:center">
-          <img src="${logoUrl}" alt="Logo" style="height:64px;border-radius:14px;border:1px solid #1f2937;object-fit:cover"/>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:0 24px 4px;text-align:center">
-          <h2 style="margin:6px 0 0;font-size:22px;color:#fff">${APP_NAME}</h2>
-        </td>
-      </tr>
+        <td align="center">
+          <table role="presentation" width="680" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="max-width:680px;background:#0b0f17;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+            <tr>
+              <td align="center" style="padding:28px 24px 8px;">
+                <img src="${logoUrl}" alt="Logo" width="64" height="64" style="height:64px;width:64px;border-radius:14px;border:1px solid #1f2937;object-fit:cover;display:block"/>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding:0 24px 4px;">
+                <h2 style="margin:6px 0 0;font-size:22px;color:#ffffff">${APP_NAME}</h2>
+              </td>
+            </tr>
 
-      <tr><td style="height:10px"></td></tr>
+            <tr><td style="height:10px;line-height:10px;">&nbsp;</td></tr>
 
-      <tr>
-        <td style="padding:0 24px">
-          <p style="${p}">¡Bienvenido, <b>${username}</b>! 🎉 Te felicito por dar este paso. Desde hoy formas parte de la comunidad enfocada en <b>libertad, resultados reales y crecimiento constante</b>.</p>
-          <p style="${p}">Aquí encontrarás todo el <b>contenido, clases y señales</b> que te ayudarán a operar con claridad y confianza.</p>
+            <tr>
+              <td style="padding:0 24px;color:#e5e7eb;">
+                <p style="${p}">¡Bienvenido, <b>${username}</b>! 🎉 Te felicito por dar este paso. Desde hoy formas parte de la comunidad enfocada en <b>libertad, resultados reales y crecimiento constante</b>.</p>
+                <p style="${p}">Aquí encontrarás todo el <b>contenido, clases y señales</b> que te ayudarán a operar con claridad y confianza.</p>
 
-          <div style="margin:18px 0 8px">
-            <p style="${p}"><b>Nota importante:</b> Antes de crear tu cuenta en Discord, usa el <b>mismo correo</b> con el que realizaste la compra.</p>
-          </div>
+                <div style="margin:18px 0 8px">
+                  <p style="${p}"><b>Nota importante:</b> Antes de crear tu cuenta en Discord, usa el <b>mismo correo</b> con el que realizaste la compra.</p>
+                </div>
 
-          <div style="margin:18px 0">
-            <a href="${discordDownloadUrl}" style="${btn}background:#6366f1;color:#fff">Descargar Discord</a>
-          </div>
-          <div style="margin:8px 0 20px">
-            <a href="${discordTutorialUrl}" style="${btn}background:#0ea5e9;color:#fff">Ver cómo crear tu cuenta</a>
-          </div>
+                <div style="margin:18px 0">
+                  <a href="${discordDownloadUrl}" style="${btn}background:#6366f1;color:#fff">Descargar Discord</a>
+                </div>
+                <div style="margin:8px 0 20px">
+                  <a href="${discordTutorialUrl}" style="${btn}background:#0ea5e9;color:#fff">Ver cómo crear tu cuenta</a>
+                </div>
 
-          <div style="margin:22px 0">
-            <p style="${p}">Si al pagar no conectaste tu Discord, reclámalo aquí:</p>
-            <a href="${claimLink}" style="${btn}background:#16a34a;color:#fff">Acceso al servidor (activar rol)</a>
-            <p style="margin:8px 0 0;color:#9ca3af;font-size:12px">Este enlace es <b>de un solo uso</b> y expira en <b>24 horas</b>.</p>
-          </div>
+                <div style="margin:22px 0">
+                  <p style="${p}">Si al pagar no conectaste tu Discord, reclámalo aquí:</p>
+                  <a href="${claimLink}" style="${btn}background:#16a34a;color:#fff">Acceso al servidor (activar rol)</a>
+                  <p style="margin:8px 0 0;color:#9ca3af;font-size:12px">Este enlace es <b>de un solo uso</b> y expira en <b>24 horas</b>.</p>
+                </div>
 
-          <hr style="border:none;border-top:1px solid #1f2937;margin:26px 0" />
+                <hr style="border:none;border-top:1px solid #1f2937;margin:26px 0" />
 
-          <p style="${p}"><b>Comunidades privadas</b></p>
-          <div style="margin:10px 0 24px">
-            <a href="${whatsappUrl}" style="${btn}background:#22c55e;color:#0b0f17;margin-right:8px">WhatsApp</a>
-            <a href="${telegramUrl}" style="${btn}background:#8b5cf6;color:#0b0f17">Telegram</a>
-          </div>
+                <p style="${p}"><b>Comunidades privadas</b></p>
+                <div style="margin:10px 0 24px;text-align:center">
+                  <a href="${whatsappUrl}" style="text-decoration:none;margin-right:16px;">
+                    <img src="${iconWhatsapp}" alt="WhatsApp" width="26" height="26" style="vertical-align:middle;margin-right:6px;">
+                    <span style="color:#22c55e;font-weight:700;">WhatsApp</span>
+                  </a>
+                  <a href="${telegramUrl}" style="text-decoration:none;">
+                    <img src="${iconTelegram}" alt="Telegram" width="26" height="26" style="vertical-align:middle;margin-right:6px;">
+                    <span style="color:#8b5cf6;font-weight:700;">Telegram</span>
+                  </a>
+                </div>
 
-          <p style="color:#9ca3af;font-size:12px;margin-top:10px">Si no solicitaste este acceso, ignora este correo.</p>
-        </td>
-      </tr>
+                <p style="color:#9ca3af;font-size:12px;margin-top:10px">Si no solicitaste este acceso, ignora este correo.</p>
+              </td>
+            </tr>
 
-      <tr>
-        <td style="padding:0">
-          <img src="${footerImageUrl}" alt="Footer" style="width:100%;display:block;max-height:120px;object-fit:cover;opacity:.95"/>
+            <tr>
+              <td style="padding:0">
+                <img src="${footerImageUrl}" alt="Footer" style="width:100%;display:block;max-height:120px;object-fit:cover;opacity:.95"/>
+              </td>
+            </tr>
+
+          </table>
         </td>
       </tr>
     </table>
@@ -321,7 +342,7 @@ function requireClaim(req, res, next) {
   const { claim } = req.query || {};
   if (!claim) return res.status(401).send('🔒 Link inválido. Revisa tu correo de compra para reclamar acceso.');
   try {
-    const payload = jwt.verify(claim, JWT_SECRET);
+    const payload = jwt.verify(claim, JWT_SECRET); // { whop_user_id, membership_id, jti, iat, exp }
     req.claim = payload;
     return next();
   } catch {
@@ -425,12 +446,12 @@ app.post('/webhook/whop', async (req, res) => {
     }
 
     const body = req.body || {};
-    const action = body?.action || body?.event;
+    an = body?.action || body?.event;
 
     const event_id = getEventIdFromWhop(body);
-    const dedupe = await ensureEventNotProcessedAndLog({ event_id, event_type: action || 'unknown', body });
+    const dedupe = await ensureEventNotProcessedAndLog({ event_id, event_type: an || 'unknown', body });
     if (dedupe.isDuplicate) {
-      console.log('🚫 Webhook duplicado ignorado. event_id=', event_id, 'action=', action);
+      console.log('🚫 Webhook duplicado ignorado. event_id=', event_id, 'action=', an);
       return res.status(200).json({ status: 'duplicate_ignored' });
     }
 
@@ -438,9 +459,9 @@ app.post('/webhook/whop', async (req, res) => {
     const whop_user_id  = body?.data?.user?.id || body?.data?.user_id || null;
     const membership_id = body?.data?.id || body?.data?.membership_id || null;
 
-    console.log('📦 Webhook Whop:', { action, email, whop_user_id, membership_id });
+    console.log('📦 Webhook Whop:', { action: an, email, whop_user_id, membership_id });
 
-    if (okEvents.has(action)) {
+    if (okEvents.has(an)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
         await addRoleIfMember(GUILD_ID, ROLE_ID, linked.discord_id);
@@ -467,7 +488,7 @@ app.post('/webhook/whop', async (req, res) => {
       return res.json({ status: 'no_email_or_ids' });
     }
 
-    if (cancelEvents.has(action)) {
+    if (cancelEvents.has(an)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
         const url = `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${linked.discord_id}/roles/${ROLE_ID}`;
@@ -508,7 +529,7 @@ if (TEST_MODE === 'true') {
     res.set('Content-Type', 'text/html').send(html);
   });
 
-  // Prueba directa de envío
+  // prueba directa de envío SMTP
   app.get('/send-test', async (req, res) => {
     const to = (req.query.to || GMAIL_USER || '').toString();
     if (!to) return res.status(400).send('Falta ?to=');
@@ -518,27 +539,15 @@ if (TEST_MODE === 'true') {
     res.send('OK, correo de prueba enviado (revisa inbox/spam).');
   });
 
-  // Diagnóstico SMTP: verificar conexión sin enviar
-  app.get('/smtp-verify', async (req, res) => {
-    if (!mailer) return res.status(400).send('Mailer nulo (revisa GMAIL_USER/PASS).');
+  // verificación SMTP (muestra error/ok en navegador)
+  app.get('/smtp-verify', async (_req, res) => {
+    if (!mailer) return res.status(200).send('Mailer inactivo (faltan GMAIL_USER/GMAIL_PASS)');
     try {
-      const ok = await mailer.verify();
-      return res.status(200).send('SMTP OK: ' + JSON.stringify(ok));
+      await mailer.verify();
+      res.status(200).send('SMTP OK ✅');
     } catch (e) {
-      console.log('❌ SMTP verify error:', e?.message || e);
-      return res.status(500).send('SMTP ERROR: ' + (e?.message || e));
+      res.status(500).send('SMTP ERROR: ' + (e?.message || e));
     }
-  });
-
-  // Diagnóstico SMTP: ver configuración (sin exponer pass)
-  app.get('/smtp-debug', (req, res) => {
-    const mask = (s) => (s ? s.replace(/.(?=.{4})/g, '*') : '');
-    res.json({
-      GMAIL_USER,
-      FROM_EMAIL,
-      hasPass: !!GMAIL_PASS,
-      passSample: mask(GMAIL_PASS || '')
-    });
   });
 }
 
