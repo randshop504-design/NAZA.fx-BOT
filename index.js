@@ -1,5 +1,6 @@
 // ==========================
-// NAZA.fx BOT — INDEX FINAL PRO (Dark Email + OAuth2 + Supabase + Dedupe)
+// NAZA.fx BOT — INDEX FINAL PRO (SMTP + Email Preview + Test)
+// Whop ↔ Render ↔ Discord + Supabase + Gmail + Dedupe + Ping/Pong
 // ==========================
 
 require('dotenv').config();
@@ -20,7 +21,8 @@ const app = express();
 // ENV VARS
 // ==========================
 const {
-  // Discord
+  APP_NAME = 'NAZA Trading Academy',
+
   DISCORD_BOT_TOKEN,
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
@@ -28,51 +30,48 @@ const {
   GUILD_ID,
   ROLE_ID,
 
-  // Seguridad
   JWT_SECRET,
-  WHOP_SIGNING_SECRET,
 
-  // Infra
-  RENDER_EXTERNAL_URL,
-  SUCCESS_URL,
-
-  // Supabase
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE,
 
-  // Email (Gmail)
+  RENDER_EXTERNAL_URL,
+  SUCCESS_URL,
+
+  // Gmail (SMTP)
   GMAIL_USER,
   GMAIL_PASS,
-  FROM_EMAIL,
+  FROM_EMAIL, // Ej: NAZA Trading Academy <alexzaldivar693@gmail.com>
 
-  // Enlaces que aparecen en el correo
+  // Firma de Whop (opcional PRO)
+  WHOP_SIGNING_SECRET,
+
+  // Enlaces para el correo de bienvenida
   DISCORD_DOWNLOAD_URL = 'https://discord.com/download',
-  DISCORD_TUTORIAL_URL,
-  WHATSAPP_URL,
-  TELEGRAM_URL,
+  DISCORD_TUTORIAL_URL = 'https://youtu.be/_51EAeKtTs0',
+  WHATSAPP_URL = 'https://chat.whatsapp.com/EEgZlswrpjT2Jgv9ZWKgu5?mode=wwt',
+  TELEGRAM_URL = 'https://t.me/NASATRADINGACADEMI',
 
-  // Logos (pon tus URLs públicas de Supabase)
-  LOGO_URL,         // logo superior (redondo/circular visual)
-  FOOTER_LOGO_URL,  // banner inferior rectangular
+  // Activos visuales (hosteados en Supabase Storage)
+  LOGO_URL = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg',
+  FOOTER_IMAGE_URL = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/baner/WhatsApp%20Image%202025-11-03%20at%209.29.04%20PM.jpeg',
 
-  // Modo pruebas
   TEST_MODE
 } = process.env;
 
 // ==========================
-// SUPABASE CLIENT
+// SUPABASE
 // ==========================
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
 
-// ===== Helpers de persistencia (DB)
 async function linkGet(membership_id) {
   const { data, error } = await supabase
     .from('membership_links')
     .select('membership_id, discord_id')
     .eq('membership_id', membership_id)
-    .limit(1);
+    .maybeSingle();
   if (error) { console.log('supabase linkGet error:', error.message); return null; }
-  return (data && data[0]) || null;
+  return data || null;
 }
 
 async function linkSet(membership_id, discord_id) {
@@ -84,28 +83,15 @@ async function linkSet(membership_id, discord_id) {
 
 async function claimAlreadyUsed(membership_id, jti) {
   if (!jti) return false;
-
-  // 1) Asegura fila placeholder en membership_links (por el FK)
-  const up = await supabase
-    .from('membership_links')
-    .upsert({ membership_id }, { onConflict: 'membership_id' });
-  if (up.error) {
-    console.log('supabase link placeholder error:', up.error.message);
-    // seguimos; si falla aquí, el insert de claims_used hará FK error y lo veremos en logs
-  }
-
-  // 2) Inserta JTI (único). Si ya existe → duplicado
   const { error } = await supabase
     .from('claims_used')
     .insert({ jti, membership_id });
-
-  if (!error) return false;                 // primera vez OK
-  if (error.code === '23505') return true;  // único → ya usado
+  if (!error) return false;                // primera vez
+  if (error.code === '23505') return true; // duplicado → ya usado
   console.log('supabase claimAlreadyUsed error:', error.message);
-  return true; // bloquea por seguridad ante error desconocido
+  return true;
 }
 
-// ===== Dedupe de webhooks (Whop) + logs
 function getEventIdFromWhop(body) {
   const c = [
     body?.id,
@@ -124,20 +110,20 @@ async function ensureEventNotProcessedAndLog({ event_id, event_type, body }) {
     .from('webhook_logs')
     .insert({ event_id, event_type, data: body || null });
   if (!error) return { isDuplicate: false };
-  if (error.code === '23505') return { isDuplicate: true }; // unique_violation
+  if (error.code === '23505') return { isDuplicate: true };
   console.log('supabase webhook_logs insert error:', error.message);
   return { isDuplicate: true, error };
 }
 
 // ==========================
-// DISCORD CLIENT + Ping/Pong
+// DISCORD (Ping/Pong)
 // ==========================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent // ← necesario para leer "ping"
+    GatewayIntentBits.MessageContent
   ],
   partials: [Partials.GuildMember]
 });
@@ -146,12 +132,11 @@ client.once('ready', () => {
   console.log('✅ Bot conectado como', client.user.tag);
 });
 
-// Ping/Pong simple
 client.on('messageCreate', async (msg) => {
   try {
     if (msg.author.bot) return;
     if (!msg.guild) return;
-    const content = msg.content.trim().toLowerCase();
+    const content = (msg.content || '').trim().toLowerCase();
     if (content === 'ping' || content === '(ping)') {
       await msg.reply('pong 🏓');
     }
@@ -160,9 +145,6 @@ client.on('messageCreate', async (msg) => {
   }
 });
 
-// ==========================
-// Discord helpers (roles / join)
-// ==========================
 async function addRoleIfMember(guildId, roleId, userId) {
   try {
     const guild = await client.guilds.fetch(guildId);
@@ -182,7 +164,6 @@ async function addRoleIfMember(guildId, roleId, userId) {
 
 async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessToken, botToken) {
   try {
-    // join al guild (PUT members)
     const putRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
       method: 'PUT',
       headers: { 'Authorization': `Bot ${botToken}`, 'Content-Type': 'application/json' },
@@ -193,7 +174,6 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
       console.log('⚠️ No se pudo unir al guild. status=', putRes.status, txt);
     }
 
-    // asignar rol
     const roleRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
       method: 'PUT',
       headers: { 'Authorization': `Bot ${botToken}` }
@@ -213,15 +193,20 @@ async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessTo
 }
 
 // ==========================
-// Email (Gmail con App Password) — auto fallback a FAKE
+// Email (SMTP Gmail) + Template
 // ==========================
 const mailer = (GMAIL_USER && GMAIL_PASS)
-  ? nodemailer.createTransport({ service: 'gmail', auth: { user: GMAIL_USER, pass: GMAIL_PASS } })
+  ? nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+    })
   : null;
 
 async function sendEmail(to, { subject, html }) {
   if (!mailer) {
-    console.log('📧 [FAKE EMAIL] →', to, '|', subject, '|', (html || '').substring(0, 140) + '...');
+    console.log('📧 [FAKE EMAIL] →', to, '|', subject);
     return;
   }
   try {
@@ -237,95 +222,75 @@ async function sendEmail(to, { subject, html }) {
   }
 }
 
-// ==========================
-// Email Template (DARK THEME + logos + íconos)
-// ==========================
 function buildWelcomeEmailHTML({
   username = 'Trader',
-  claimLink, // ← link con ?claim=...
-  logoUrl = LOGO_URL,
-  footerLogoUrl = FOOTER_LOGO_URL,
-  downloadUrl = DISCORD_DOWNLOAD_URL,
-  tutorialUrl = DISCORD_TUTORIAL_URL,
+  claimLink,
+  discordDownloadUrl = DISCORD_DOWNLOAD_URL,
+  discordTutorialUrl = DISCORD_TUTORIAL_URL,
   whatsappUrl = WHATSAPP_URL,
-  telegramUrl = TELEGRAM_URL
+  telegramUrl = TELEGRAM_URL,
+  logoUrl = LOGO_URL,
+  footerImageUrl = FOOTER_IMAGE_URL
 } = {}) {
-  const bg = '#0f1115';
-  const panel = '#111827';
-  const border = '#1f2937';
-  const text = '#e5e7eb';
-  const sub = '#9ca3af';
-  const green = '#16A34A';     // Acceso (claim)
-  const blue = '#0EA5E9';      // Descargar Discord
-  const sky = '#38BDF8';       // Crear cuenta
-  const wa = '#25D366';        // WhatsApp
-  const tg = '#8B5CF6';        // Telegram
-
-  const btn = (bgc, color = '#fff') => `display:inline-flex;align-items:center;gap:10px;padding:12px 16px;border-radius:10px;font-weight:700;text-decoration:none;color:${color};background:${bgc}`;
-  const wrap = `font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:640px;margin:auto;background:${bg};padding:24px;color:${text};border-radius:14px`;
-  const h1 = 'margin:8px 0 18px;text-align:center;font-size:22px;color:#fff';
-  const p = 'margin:0 0 14px;line-height:1.6;color:'+text;
-  const card = `background:${panel};border:1px solid ${border};border-radius:12px;padding:16px`;
-
-  // SVGs seguros inline
-  const icDiscord = `<svg width="18" height="18" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20.317 4.369A19.79 19.79 0 0016.558 3c-.2.36-.433.85-.593 1.234a18.27 18.27 0 00-7.93 0A8.258 8.258 0 007.44 3c-1.4.256-2.73.69-3.76 1.369C.64 8.045-.23 11.6.07 15.105A19.9 19.9 0 006.08 18c.466-.64.88-1.33 1.23-2.055-.68-.26-1.33-.58-1.95-.95.16-.12.32-.25.47-.38 3.74 1.75 7.8 1.75 11.51 0 .16.13.32.26.48.38-.62.37-1.27.69-1.95.95.35.725.76 1.415 1.23 2.055A19.9 19.9 0 0023.93 15.1c.3-3.5-.57-7.056-3.613-10.731z"/></svg>`;
-  const icPlay = `<svg width="18" height="18" viewBox="0 0 24 24" fill="#0b1020" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>`;
-  const icKey  = `<svg width="18" height="18" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M14 3a7 7 0 00-6.93 6H1v4h4v4h4v4h4v-4h2l3-3a7 7 0 00-4-11zM9 9a5 5 0 115 5 5 5 0 01-5-5z"/></svg>`;
-  const icWA   = `<svg width="18" height="18" viewBox="0 0 32 32" fill="#04210e" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M19.11 17.21c-.29-.15-1.7-.84-1.96-.93-.26-.1-.45-.15-.64.15-.19.3-.74.93-.9 1.12-.17.19-.33.22-.62.08-.29-.15-1.23-.45-2.35-1.44-.87-.77-1.46-1.72-1.63-2-.17-.3 0-.46.13-.6.14-.14.3-.33.45-.5.15-.18.19-.3.29-.49.1-.19.05-.37-.02-.52-.07-.15-.64-1.54-.88-2.1-.23-.56-.47-.48-.64-.49h-.54c-.19 0-.5.07-.76.37-.26.3-1 1-1 2.46s1.03 2.86 1.18 3.06c.15.2 2.02 3.09 4.9 4.33.69.3 1.23.48 1.65.62.69.22 1.32.19 1.82.12.56-.08 1.7-.69 1.94-1.36.24-.67.24-1.25.17-1.37-.07-.12-.26-.19-.55-.34z"/><path d="M26.83 5.17C24.53 2.87 21.39 1.6 18 1.6 9.93 1.6 3.6 7.94 3.6 16c0 2.25.57 4.45 1.65 6.4L3.2 30.4l8.13-2.02A14.25 14.25 0 0018 30.4c8.06 0 14.4-6.34 14.4-14.4 0-3.39-1.27-6.53-3.57-8.83zM18 27.6c-2.05 0-4.04-.54-5.8-1.56l-.42-.25-4.82 1.2 1.28-4.68-.28-.46a11.98 11.98 0 01-1.82-6.85C6.14 9.12 11.48 3.6 18 3.6c3.32 0 6.45 1.29 8.8 3.63 2.35 2.35 3.63 5.48 3.63 8.77 0 6.52-5.34 11.6-12.43 11.6z"/></svg>`;
-  const icTG   = `<svg width="18" height="18" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9.04 15.47l-.37 5.23c.53 0 .76-.23 1.04-.5l2.5-2.38 5.18 3.8c.95.52 1.62.25 1.88-.88l3.41-15.95c.34-1.54-.56-2.14-1.56-1.77L1.38 9.7c-1.51.59-1.49 1.44-.26 1.82l4.8 1.5 11.16-7.03c.52-.32 1-.14.61.18"/></svg>`;
+  const btn = 'display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;';
+  const p = 'margin:0 0 14px;line-height:1.55;';
 
   return `
-  <div style="${wrap}">
-    <!-- Logo superior -->
-    ${logoUrl ? `<div style="text-align:center;margin-bottom:12px;">
-      <img src="${logoUrl}" alt="NAZA Logo" width="72" height="72" style="width:72px;height:72px;border-radius:999px;display:inline-block;object-fit:cover;">
-    </div>` : ''}
+  <div style="background:#0b0f17;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:0;margin:0">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px;margin:auto;background:#0b0f17">
+      <tr>
+        <td style="padding:28px 24px 8px;text-align:center">
+          <img src="${logoUrl}" alt="Logo" style="height:64px;border-radius:14px;border:1px solid #1f2937;object-fit:cover"/>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0 24px 4px;text-align:center">
+          <h2 style="margin:6px 0 0;font-size:22px;color:#fff">${APP_NAME}</h2>
+        </td>
+      </tr>
 
-    <!-- Título -->
-    <h1 style="${h1}">NAZA Trading Academy</h1>
+      <tr><td style="height:10px"></td></tr>
 
-    <!-- Bienvenida -->
-    <div style="${card};margin-bottom:16px;">
-      <p style="${p}">¡Bienvenido, <b>${username}</b>! 🎉</p>
-      <p style="${p}">Desde hoy formas parte de una comunidad enfocada en <b>libertad, resultados reales y crecimiento constante</b>. Aquí encontrarás <b>contenido, clases y señales</b> para operar con claridad y confianza.</p>
-    </div>
+      <tr>
+        <td style="padding:0 24px">
+          <p style="${p}">¡Bienvenido, <b>${username}</b>! 🎉 Te felicito por dar este paso. Desde hoy formas parte de la comunidad enfocada en <b>libertad, resultados reales y crecimiento constante</b>.</p>
+          <p style="${p}">Aquí encontrarás todo el <b>contenido, clases y señales</b> que te ayudarán a operar con claridad y confianza.</p>
 
-    <!-- Nota importante -->
-    <div style="${card};margin-bottom:16px;">
-      <p style="${p}"><b>NOTA importante:</b> Usa el <b>mismo correo</b> con el que realizaste la compra cuando crees tu cuenta de Discord.</p>
-    </div>
+          <div style="margin:18px 0 8px">
+            <p style="${p}"><b>Nota importante:</b> Antes de crear tu cuenta en Discord, usa el <b>mismo correo</b> con el que realizaste la compra.</p>
+          </div>
 
-    <!-- Herramientas Discord -->
-    <div style="display:block;gap:12px;margin-bottom:16px;text-align:center;">
-      <div style="margin-bottom:10px;">
-        <a href="${downloadUrl}" style="${btn(blue)}">${icDiscord} Descargar Discord</a>
-      </div>
-      ${tutorialUrl ? `<div><a href="${tutorialUrl}" style="${btn(sky,'#0b1020')}">${icPlay} Ver cómo crear tu cuenta</a></div>` : ''}
-    </div>
+          <div style="margin:18px 0">
+            <a href="${discordDownloadUrl}" style="${btn}background:#6366f1;color:#fff">Descargar Discord</a>
+          </div>
+          <div style="margin:8px 0 20px">
+            <a href="${discordTutorialUrl}" style="${btn}background:#0ea5e9;color:#fff">Ver cómo crear tu cuenta</a>
+          </div>
 
-    <!-- Acceso (claim) -->
-    ${claimLink ? `<div style="${card};margin-bottom:16px;text-align:center;">
-      <p style="${p}">Si al pagar no conectaste tu Discord, hazlo aquí:</p>
-      <a href="${claimLink}" style="${btn(green)}">${icKey} Acceso al servidor (activar rol)</a>
-      <p style="margin:8px 0 0;color:${sub};font-size:12px">Este enlace es <b>de un solo uso</b> y <b>expira en 24 horas</b>.</p>
-    </div>` : ''}
+          <div style="margin:22px 0">
+            <p style="${p}">Si al pagar no conectaste tu Discord, reclámalo aquí:</p>
+            <a href="${claimLink}" style="${btn}background:#16a34a;color:#fff">Acceso al servidor (activar rol)</a>
+            <p style="margin:8px 0 0;color:#9ca3af;font-size:12px">Este enlace es <b>de un solo uso</b> y expira en <b>24 horas</b>.</p>
+          </div>
 
-    <!-- Comunidades -->
-    <div style="${card};margin-bottom:16px;">
-      <p style="${p}"><b>Comunidades privadas</b></p>
-      <div style="display:block;gap:10px;">
-        ${whatsappUrl ? `<div style="margin-bottom:10px;">
-          <a href="${whatsappUrl}" style="${btn(wa,'#04210e')}">${icWA} Unirme a la comunidad en WhatsApp</a>
-        </div>` : ''}
-        ${telegramUrl ? `<div>
-          <a href="${telegramUrl}" style="${btn(tg)}">${icTG} Unirme a la comunidad en Telegram</a>
-        </div>` : ''}
-      </div>
-    </div>
+          <hr style="border:none;border-top:1px solid #1f2937;margin:26px 0" />
 
-    ${footerLogoUrl ? `<div style="text-align:center;margin-top:10px;">
-      <img src="${footerLogoUrl}" alt="NAZA Footer" style="width:100%;max-width:640px;height:auto;border-radius:10px;display:inline-block;">
-    </div>` : ''}
+          <p style="${p}"><b>Comunidades privadas</b></p>
+          <div style="margin:10px 0 24px">
+            <a href="${whatsappUrl}" style="${btn}background:#22c55e;color:#0b0f17;margin-right:8px">WhatsApp</a>
+            <a href="${telegramUrl}" style="${btn}background:#8b5cf6;color:#0b0f17">Telegram</a>
+          </div>
+
+          <p style="color:#9ca3af;font-size:12px;margin-top:10px">Si no solicitaste este acceso, ignora este correo.</p>
+        </td>
+      </tr>
+
+      <tr>
+        <td style="padding:0">
+          <img src="${footerImageUrl}" alt="Footer" style="width:100%;display:block;max-height:120px;object-fit:cover;opacity:.95"/>
+        </td>
+      </tr>
+    </table>
   </div>`;
 }
 
@@ -337,9 +302,9 @@ app.use(bodyParser.json({ type: '*/*', verify: rawBodySaver }));
 
 app.get('/', (_req, res) => res.status(200).send('NAZA.fx BOT up ✔'));
 
-// (Opcional PRO) Verificación de firma Whop
+// Firma Whop (opcional)
 function verifyWhopSignature(req) {
-  if (!WHOP_SIGNING_SECRET) return true; // sin secreto, no bloqueamos (dev)
+  if (!WHOP_SIGNING_SECRET) return true;
   const signature = req.get('Whop-Signature') || req.get('X-Whop-Signature');
   if (!signature) return false;
   const hmac = crypto.createHmac('sha256', WHOP_SIGNING_SECRET);
@@ -348,7 +313,9 @@ function verifyWhopSignature(req) {
   return expected === signature;
 }
 
-// ======= OAuth2: exigir claim (un solo uso)
+// ==========================
+// OAuth2 Discord (protegido con claim)
+// ==========================
 function requireClaim(req, res, next) {
   const { claim } = req.query || {};
   if (!claim) return res.status(401).send('🔒 Link inválido. Revisa tu correo de compra para reclamar acceso.');
@@ -361,7 +328,6 @@ function requireClaim(req, res, next) {
   }
 }
 
-// ======= OAuth2: iniciar
 app.get('/discord/login', requireClaim, (req, res) => {
   try {
     const state = jwt.sign(
@@ -384,14 +350,12 @@ app.get('/discord/login', requireClaim, (req, res) => {
   }
 });
 
-// ======= OAuth2: callback
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code) return res.status(400).send('Falta "code"');
-    const st = jwt.verify(state, JWT_SECRET); // { membership_id, whop_user_id, jti, ts }
+    const st = jwt.verify(state, JWT_SECRET);
 
-    // 1) token exchange
     const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -411,7 +375,6 @@ app.get('/discord/callback', async (req, res) => {
     const tokens = await tokenRes.json();
     const accessToken = tokens.access_token;
 
-    // 2) user
     const meRes = await fetch('https://discord.com/api/v10/users/@me', {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
@@ -420,24 +383,20 @@ app.get('/discord/callback', async (req, res) => {
       console.log('⚠️ users/@me failed:', meRes.status, txt);
       return res.status(400).send('⚠️ Error al leer tu usuario de Discord.');
     }
-    const me = await meRes.json(); // { id, username, ... }
+    const me = await meRes.json();
 
-    // 3) 1 Discord por membresía
     const existing = await linkGet(st.membership_id);
     if (existing && existing.discord_id && existing.discord_id !== me.id) {
       return res.status(403).send('⛔ Esta membresía ya está vinculada a otra cuenta de Discord.');
     }
 
-    // 4) claim de 1 solo uso
     if (await claimAlreadyUsed(st.membership_id, st.jti)) {
       return res.status(409).send('⛔ Este enlace ya fue usado.');
     }
 
-    // 5) auto-join + rol
     const ok = await joinGuildAndRoleWithAccessToken(GUILD_ID, ROLE_ID, me.id, accessToken, DISCORD_BOT_TOKEN);
     if (!ok) return res.status(200).send('⚠️ Autorizado, pero no se pudo asignar el rol. Tu ID: ' + me.id);
 
-    // 6) guardar vínculo si no existía
     if (!existing || !existing.discord_id) await linkSet(st.membership_id, me.id);
 
     return res.status(200).send('✅ Acceso concedido. Revisa Discord.');
@@ -447,7 +406,9 @@ app.get('/discord/callback', async (req, res) => {
   }
 });
 
-// ======= Webhook de Whop
+// ==========================
+// Webhook Whop
+// ==========================
 const okEvents = new Set(['payment_succeeded', 'membership_activated', 'membership_went_valid']);
 const cancelEvents = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
 
@@ -457,7 +418,6 @@ function newClaim({ membership_id, whop_user_id }) {
 
 app.post('/webhook/whop', async (req, res) => {
   try {
-    // Firma (opcional)
     if (!verifyWhopSignature(req)) {
       console.log('⛔ Firma de Whop inválida');
       return res.status(401).json({ error: 'invalid_signature' });
@@ -466,7 +426,6 @@ app.post('/webhook/whop', async (req, res) => {
     const body = req.body || {};
     const action = body?.action || body?.event;
 
-    // Anti-duplicados
     const event_id = getEventIdFromWhop(body);
     const dedupe = await ensureEventNotProcessedAndLog({ event_id, event_type: action || 'unknown', body });
     if (dedupe.isDuplicate) {
@@ -480,7 +439,6 @@ app.post('/webhook/whop', async (req, res) => {
 
     console.log('📦 Webhook Whop:', { action, email, whop_user_id, membership_id });
 
-    // Altas / renovaciones
     if (okEvents.has(action)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
@@ -498,7 +456,7 @@ app.post('/webhook/whop', async (req, res) => {
         });
 
         await sendEmail(email, {
-          subject: 'Bienvenido a NAZA Trading Academy — Acceso y pasos (Discord)',
+          subject: `${APP_NAME} — Acceso y pasos (Discord)`,
           html
         });
 
@@ -508,7 +466,6 @@ app.post('/webhook/whop', async (req, res) => {
       return res.json({ status: 'no_email_or_ids' });
     }
 
-    // Bajas / expiraciones
     if (cancelEvents.has(action)) {
       const linked = membership_id ? await linkGet(membership_id) : null;
       if (linked?.discord_id) {
@@ -528,30 +485,10 @@ app.post('/webhook/whop', async (req, res) => {
   }
 });
 
-// ====== Rutas de prueba (habilita con TEST_MODE=true)
-if (TEST_MODE === 'true') {  // Enviar un correo de prueba directo
-  app.get('/send-test', async (req, res) => {
-    try {
-      const to = (req.query.to || '').trim();
-      if (!to) return res.status(400).send('Falta ?to=correo@dominio.com');
-
-      const claimLink = `${(SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`)}?claim=FAKE.TEST.CLAIM`;
-      const html = buildWelcomeEmailHTML({
-        username: 'NAZA Tester',
-        claimLink
-      });
-
-      await sendEmail(to, {
-        subject: 'Prueba de correo — NAZA Trading Academy',
-        html
-      });
-
-      return res.status(200).send(`✅ Enviado a ${to}. Revisa tu bandeja y SPAM.`);
-    } catch (e) {
-      console.error('❌ /send-test error:', e?.message || e);
-      return res.status(500).send('Error enviando el correo de prueba.');
-    }
-  });
+// ==========================
+// Rutas TEST (habilitar con TEST_MODE=true)
+// ==========================
+if (TEST_MODE === 'true') {
   app.get('/test-claim', (req, res) => {
     const claim = jwt.sign(
       { membership_id: 'TEST-' + Date.now(), whop_user_id: 'TEST', jti: crypto.randomUUID() },
@@ -566,11 +503,18 @@ if (TEST_MODE === 'true') {  // Enviar un correo de prueba directo
 
   app.get('/email-preview', (req, res) => {
     const claimLink = `${SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`}?claim=FAKE.TEST.CLAIM`;
-    const html = buildWelcomeEmailHTML({
-      username: 'NAZA Tester',
-      claimLink
-    });
+    const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink });
     res.set('Content-Type', 'text/html').send(html);
+  });
+
+  // NUEVA: prueba directa de envío
+  app.get('/send-test', async (req, res) => {
+    const to = (req.query.to || GMAIL_USER || '').toString();
+    if (!to) return res.status(400).send('Falta ?to=');
+    const claimLink = `${SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`}?claim=FAKE.TEST.CLAIM`;
+    const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink });
+    await sendEmail(to, { subject: `${APP_NAME} — Prueba de correo`, html });
+    res.send('OK, correo de prueba enviado (revisa inbox/spam).');
   });
 }
 
