@@ -70,9 +70,9 @@ async function linkGet(membership_id) {
     .from('membership_links')
     .select('membership_id, discord_id')
     .eq('membership_id', membership_id)
-    .maybeSingle();
+    .limit(1);
   if (error) { console.log('supabase linkGet error:', error.message); return null; }
-  return data || null;
+  return (data && data[0]) || null;
 }
 
 async function linkSet(membership_id, discord_id) {
@@ -84,13 +84,25 @@ async function linkSet(membership_id, discord_id) {
 
 async function claimAlreadyUsed(membership_id, jti) {
   if (!jti) return false;
+
+  // 1) Asegura fila placeholder en membership_links (por el FK)
+  const up = await supabase
+    .from('membership_links')
+    .upsert({ membership_id }, { onConflict: 'membership_id' });
+  if (up.error) {
+    console.log('supabase link placeholder error:', up.error.message);
+    // seguimos; si falla aquí, el insert de claims_used hará FK error y lo veremos en logs
+  }
+
+  // 2) Inserta JTI (único). Si ya existe → duplicado
   const { error } = await supabase
     .from('claims_used')
     .insert({ jti, membership_id });
-  if (!error) return false;                // primera vez
-  if (error.code === '23505') return true; // duplicado → ya usado
+
+  if (!error) return false;                 // primera vez OK
+  if (error.code === '23505') return true;  // único → ya usado
   console.log('supabase claimAlreadyUsed error:', error.message);
-  return true; // por seguridad, bloquea si hay error desconocido
+  return true; // bloquea por seguridad ante error desconocido
 }
 
 // ===== Dedupe de webhooks (Whop) + logs
