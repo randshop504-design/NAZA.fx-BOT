@@ -1,6 +1,6 @@
 // NAZA.fx BOT — INDEX DEFINITIVO (Node 18+)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail
-// Flujo: pago → /redirect (SPAM+TyC) → claim 1-uso/24h → OAuth2 Discord → entra + rol
+// Flujo: pago → /redirect (Spam+TyC) → claim 1-uso/24h → OAuth2 → entra + rol
 require('dotenv').config();
 
 const express = require('express');
@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
-// fetch (Node 18+ ya trae global, polyfill por si acaso)
+// fetch (Node 18+ ya lo trae; fallback por si acaso)
 const fetch = global.fetch || ((...a) => import('node-fetch').then(({ default: f }) => f(...a)));
 
 const app = express();
@@ -144,60 +144,95 @@ app.use((req, res, next) => {
 /* ========= Health ========= */
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-/* ========= Página post-pago (T&C) ========= */
+/* ========= Página post-pago (T&C) — versión mejorada con plan B ========= */
 app.get('/redirect', (req, res) => {
   const { claim = '', email = '', order_id = '' } = req.query || {};
-  res.set('Content-Type', 'text/html').send(`
+  res.set('Content-Type','text/html').send(`
   <!doctype html><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${APP_NAME} • Último paso</title>
   <style>
-    body{margin:0;background:#0b0d10;color:#e6e9ef;font-family:system-ui,Segoe UI,Roboto,Arial}
+    :root{--bg:#0b0d10;--card:#0f1217;--text:#e6e9ef;--muted:#98a1b3;--border:#1b212a;--btn:#2b6cff}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
     .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-    .card{width:100%;max-width:720px;background:#0f1217;border:1px solid #1b212a;border-radius:16px;padding:28px}
-    h2{margin:0 0 10px} p{margin:0 0 10px;line-height:1.55}
+    .card{width:100%;max-width:760px;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px}
+    h2{margin:0 0 8px} p{margin:0 0 10px;line-height:1.55} .muted{color:var(--muted)}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
     .pill{display:inline-block;border:1px solid #2a3240;border-radius:999px;padding:10px 18px;background:#0b0d10;cursor:pointer}
-    .btn{padding:12px 18px;border:0;border-radius:10px;background:#2b6cff;color:#fff;font-weight:700}
+    .btn{padding:12px 18px;border:0;border-radius:10px;background:var(--btn);color:#fff;font-weight:700}
     .btn[disabled]{opacity:.45;cursor:not-allowed}
-    .hint{margin-top:10px;color:#98a1b3;font-size:14px}
+    input{background:#0b0d10;border:1px solid #2a3240;border-radius:10px;padding:12px 14px;color:#e6e9ef;width:100%}
+    .error{padding:10px 12px;border:1px solid #4b1f28;background:#1a0c10;color:#ffb3c0;border-radius:10px;margin-top:10px;display:none}
+    .ok{padding:10px 12px;border:1px solid #1f3b25;background:#0f1a12;color:#b6f3c2;border-radius:10px;margin-top:10px;display:none}
   </style>
+
   <div class="wrap"><div class="card">
     <h2>Último paso para activar tu acceso</h2>
     <p><b>Compra exitosa.</b> Te enviamos un correo con tus accesos (revisa <b>Spam/Promociones</b>).</p>
-    <p><b>${APP_NAME}</b> es educativo; no es asesoría financiera.</p>
+    <p class="muted">${APP_NAME} es educativo; no es asesoría financiera.</p>
 
-    <button id="accept" class="pill" aria-pressed="false">Acepto Términos y Condiciones</button>
-    <div style="margin-top:16px"><button id="go" class="btn" disabled>Conectar con Discord</button></div>
-    <p class="hint">Si el botón no se habilita todavía, abre el enlace del correo de bienvenida.</p>
+    <div class="row">
+      <button id="accept" class="pill" aria-pressed="false">Acepto Términos y Condiciones</button>
+      <button id="go" class="btn" disabled>Conectar con Discord</button>
+    </div>
+
+    <div id="planb" style="margin-top:16px;${(!email||!order_id)?'':'display:none'}">
+      <p class="muted" style="margin:6px 0 8px">¿No se llenó automáticamente? Escribe tu <b>correo de compra</b> para generar acceso:</p>
+      <div class="row">
+        <input id="emailField" type="email" placeholder="tu@correo.com" value="${email||''}">
+        <button id="fetchBtn" class="btn">Generar acceso</button>
+      </div>
+    </div>
+
+    <div id="msgErr" class="error"></div>
+    <div id="msgOk"  class="ok"></div>
   </div></div>
 
   <script>
-    const order_id = ${JSON.stringify(order_id)};
-    const email    = ${JSON.stringify(email)};
-    let claim      = ${JSON.stringify(claim)};
-    const go = document.getElementById('go');
+    let claim = ${JSON.stringify(claim)};
+    let order_id = ${JSON.stringify(order_id)};
+    let email = ${JSON.stringify(email)};
+
     const accept = document.getElementById('accept');
+    const go = document.getElementById('go');
+    const msgErr = document.getElementById('msgErr');
+    const msgOk = document.getElementById('msgOk');
+
+    function showErr(s){ msgErr.textContent = s; msgErr.style.display='block'; }
+    function showOk(s){ msgOk.textContent = s; msgOk.style.display='block'; }
+
+    async function issue(byEmailOnly=false){
+      msgErr.style.display='none'; msgOk.style.display='none';
+      try{
+        const body = byEmailOnly ? { email } : { order_id, email };
+        const r = await fetch('/api/claim/issue', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        const j = await r.json();
+        if(!r.ok){ throw new Error(j.error || 'No se pudo validar el pago'); }
+        if(j.claim){ claim = j.claim; showOk('Acceso listo. Ahora conecta con Discord.'); return true; }
+      }catch(e){ showErr(e.message); return false; }
+    }
 
     accept.addEventListener('click', async ()=>{
       const on = accept.getAttribute('aria-pressed') !== 'true';
       accept.setAttribute('aria-pressed', on ? 'true' : 'false');
       go.disabled = !on;
 
-      if (on && !claim && order_id && email) {
-        try {
-          const r = await fetch('/api/claim/issue', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ order_id, email })
-          });
-          const j = await r.json();
-          if (r.ok && j.claim) claim = j.claim;
-        } catch (e) { /* silenciar */ }
+      if(on && !claim){
+        if(order_id && email){ await issue(false); }
       }
     });
 
+    document.getElementById('fetchBtn')?.addEventListener('click', async ()=>{
+      email = String(document.getElementById('emailField').value||'').trim().toLowerCase();
+      if(!email){ showErr('Escribe tu correo de compra.'); return; }
+      await issue(true);
+    });
+
     go.addEventListener('click', ()=>{
-      if (go.disabled) return;
-      if (!claim) { alert('No se pudo generar tu enlace seguro aún. Revisa tu correo de bienvenida.'); return; }
+      if(go.disabled) return;
+      if(!claim){ showErr('Aún no tenemos tu enlace seguro. Usa tu correo para generarlo o revisa tu email.'); return; }
       window.location.href = '/discord/login?claim=' + encodeURIComponent(claim);
     });
   </script>`);
@@ -285,59 +320,88 @@ app.get('/discord/callback', async (req, res) => {
   }
 });
 
-/* ========= Emisión de claim tras aceptar T&C ========= */
-app.post('/api/claim/issue', async (req, res) => {
-  try {
-    const { order_id, email } = req.body || {};
-    if (!order_id || !email) return res.status(400).json({ error: 'order_id y email requeridos' });
+/* ========= Emisión de claim (acepta email y/o order_id) ========= */
+app.post('/api/claim/issue', async (req,res)=>{
+  try{
+    let { order_id, email, membership_id } = req.body || {};
+    email = (email||'').toString().trim().toLowerCase();
+    order_id = (order_id||'').toString().trim();
+    membership_id = (membership_id||'').toString().trim();
 
-    const okEvents = ['payment_succeeded', 'membership_activated', 'membership_went_valid'];
-    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    if(!email && !order_id && !membership_id){
+      return res.status(400).json({ error:'email, order_id o membership_id requerido' });
+    }
+
+    const okEvents = ['payment_succeeded','membership_activated','membership_went_valid'];
+    const since = new Date(Date.now() - 24*60*60*1000).toISOString(); // 24h
 
     const { data, error } = await supabase
       .from('webhook_logs')
       .select('event_type, data, received_at')
       .gte('received_at', since)
-      .order('received_at', { ascending: false })
-      .limit(80);
+      .order('received_at', { ascending:false })
+      .limit(200);
 
-    if (error) return res.status(500).json({ error: 'db_error' });
+    if(error) return res.status(500).json({ error:'db_error' });
 
-    const found = (data || []).find(r => {
-      try {
-        const d = r.data?.data || r.data;
+    const found = (data||[]).find(r=>{
+      try{
+        const d  = r.data?.data || r.data;
         const em = (d?.user?.email || d?.email || '').toLowerCase();
-        const id = d?.id || d?.membership_id || d?.order_id || '';
-        return okEvents.includes(r.event_type) &&
-               em === String(email).toLowerCase() &&
-               String(id) === String(order_id);
-      } catch { return false; }
+        const mid = d?.membership_id || d?.id || '';
+        const oid = d?.order_id || mid;
+        const matchEmail = email ? (em === email) : true;
+        const matchOrder = order_id ? (String(oid) === String(order_id)) : true;
+        const matchMem   = membership_id ? (String(mid) === String(membership_id)) : true;
+        return okEvents.includes(r.event_type) && matchEmail && matchOrder && matchMem;
+      }catch{return false;}
     });
 
-    if (!found) return res.status(404).json({ error: 'pago_no_validado' });
+    if(!found) return res.status(404).json({ error:'pago_no_validado' });
 
-    const whop_user_id  = found.data?.data?.user?.id || found.data?.data?.user_id || 'UNKNOWN';
-    const membership_id = found.data?.data?.id || found.data?.data?.membership_id || String(order_id);
+    const d = found.data?.data || found.data;
+    const whop_user_id  = d?.user?.id || d?.user_id || 'UNKNOWN';
+    const mid = d?.membership_id || d?.id || order_id || membership_id || 'UNKNOWN';
 
-    const claim = jwt.sign({ membership_id, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '24h' });
+    const claim = jwt.sign({ membership_id: mid, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn:'24h' });
     return res.json({ claim });
-  } catch (e) {
+  }catch(e){
     console.error('issue_claim error', e?.message || e);
-    res.status(500).json({ error: 'server_error' });
+    res.status(500).json({ error:'server_error' });
   }
 });
 
-/* ========= Webhook Whop (firma v1 + logging + email backup) ========= */
+/* ========= Webhook Whop (firma robusta + logging + email backup) ========= */
 function verifyWhopV1(req) {
-  const sigHeader = req.get('Whop-Signature') || req.get('X-Whop-Signature');
-  if (!WHOP_SIGNING_SECRET) return true; // para debug local
-  if (!sigHeader) return false;
-  // formato: "t=...,v1=abcdef..."
-  const parts = Object.fromEntries(sigHeader.split(',').map(s => s.trim().split('=')));
-  const v1 = parts.v1 || '';
-  const expected = crypto.createHmac('sha256', WHOP_SIGNING_SECRET).update(req.rawBody).digest('hex');
+  if (!WHOP_SIGNING_SECRET) return true; // debug local
+  // Headers posibles en Whop
+  const sigHeader =
+    req.get('Whop-Signature') ||
+    req.get('X-Whop-Signature') ||
+    req.get('Whop-Webhook-Signature');
+
+  if (!sigHeader || !req.rawBody) return false;
+
+  // HMAC esperado (hex) sobre el body crudo
+  const expected = crypto
+    .createHmac('sha256', WHOP_SIGNING_SECRET)
+    .update(req.rawBody)
+    .digest('hex');
+
+  // Dos formatos posibles: "t=...,v1=abcdef" o solo "abcdef"
+  let provided = '';
+  if (sigHeader.includes('=')) {
+    const parts = Object.fromEntries(sigHeader.split(',').map(s => s.trim().split('=')));
+    provided = parts.v1 || '';
+  } else {
+    provided = sigHeader.trim();
+  }
+
   try {
-    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(v1, 'utf8'));
+    const A = Buffer.from(expected, 'utf8');
+    const B = Buffer.from(provided, 'utf8');
+    if (A.length !== B.length) return false;
+    return crypto.timingSafeEqual(A, B);
   } catch { return false; }
 }
 
@@ -347,7 +411,7 @@ const cancelEvents = new Set(['membership_cancelled', 'membership_cancelled_by_u
 app.post('/webhook/whop', async (req, res) => {
   try {
     if (!verifyWhopV1(req)) {
-      console.log('⛔ invalid_signature:', req.get('Whop-Signature') || req.get('X-Whop-Signature'));
+      console.log('⛔ invalid_signature:', req.get('Whop-Signature') || req.get('X-Whop-Signature') || req.get('Whop-Webhook-Signature'));
       return res.status(401).json({ error: 'invalid_signature' });
     }
 
@@ -385,28 +449,13 @@ app.post('/webhook/whop', async (req, res) => {
     res.json({ status: 'ignored' });
   } catch (e) {
     console.error('WHOP_WEBHOOK_ERROR', e?.message || e);
-    res.status(500).json({ error: 'server_error' });
+    res.status(500).json({ error:'server_error' });
   }
 });
 
-/* ========= Reenvío manual del correo ========= */
-app.post('/email/resend', async (req, res) => {
-  try {
-    const to = String(req.body.to || req.body.email || '').trim().toLowerCase();
-    const order_id = String(req.body.order_id || '').trim();
-    const username = String(req.body.username || 'Trader');
-    if (!to) return res.status(400).json({ error: 'email requerido' });
-    await sendAccessEmail({ to, email: to, order_id, username });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('email/resend error', e?.message || e);
-    res.status(500).json({ error: 'server_error' });
-  }
-});
+/* ========= DEBUG ROUTES (quítalas al lanzar) ========= */
 
-/* ========= DEBUG ROUTES (quítalas cuando lances) ========= */
-
-// 1) Verificar SMTP (Gmail)
+// Verificar SMTP (Gmail)
 app.get('/smtp-verify', async (_req, res) => {
   try {
     if (!GMAIL_USER || !GMAIL_PASS) {
@@ -423,7 +472,7 @@ app.get('/smtp-verify', async (_req, res) => {
   }
 });
 
-// 2) Ver últimos eventos guardados por el webhook
+// Últimos eventos guardados por el webhook
 app.get('/debug/webhook-logs', async (_req, res) => {
   try {
     const { data, error } = await supabase.from('webhook_logs')
@@ -437,8 +486,7 @@ app.get('/debug/webhook-logs', async (_req, res) => {
   }
 });
 
-// 3) Simular un webhook OK (para pruebas sin depender de Whop)
-//    Uso: /webhook/mock?email=tu@mail.com&membership_id=TEST-1&user_id=U1&action=payment_succeeded&token=EL_TOKEN
+// Simular webhook OK (para pruebas sin Whop)
 app.get('/webhook/mock', async (req, res) => {
   try {
     if (!ADMIN_TEST_TOKEN || req.query.token !== ADMIN_TEST_TOKEN) return res.status(401).send('UNAUTHORIZED');
