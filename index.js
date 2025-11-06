@@ -1,550 +1,260 @@
-// ==========================
-// NAZA.fx BOT — INDEX FINAL PRO (SMTP + Email Preview + Test)
-// Whop ↔ Render ↔ Discord + Supabase + Gmail + Dedupe + Ping/Pong
-// ==========================
+// index.js
+// NAZA.fx BOT — Render server (Node 18+)
+// Instala dependencias: npm i express dotenv
 
-require('dotenv').config();
+const express = require("express");
+const crypto = require("crypto");
+const dotenv = require("dotenv");
 
-const express = require('express');
-const bodyParser = require('body-parser');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
-const { createClient } = require('@supabase/supabase-js');
-// node-fetch@3 es ESM; usamos import dinámico compatible con CJS:
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
-const nodemailer = require('nodemailer');
-
+dotenv.config();
 const app = express();
 
-// ==========================
-// ENV VARS
-// ==========================
-const {
-  APP_NAME = 'NAZA Trading Academy',
+// ====== Config ======
+const PORT = process.env.PORT || 3000;
+const BASE_URL = process.env.APP_BASE_URL || `http://localhost:${PORT}`;
+const ACCESS_CONTINUE_URL =
+  process.env.ACCESS_CONTINUE_URL || "https://discord.com/app";
 
-  DISCORD_BOT_TOKEN,
-  DISCORD_CLIENT_ID,
-  DISCORD_CLIENT_SECRET,
-  DISCORD_REDIRECT_URI,
-  GUILD_ID,
-  ROLE_ID,
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
+const DISCORD_ROLE_ID_PRO = process.env.DISCORD_ROLE_ID_PRO;
 
-  JWT_SECRET,
+const WHOP_WEBHOOK_SECRET = process.env.WHOP_WEBHOOK_SECRET;
 
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE,
+// ====== Idempotencia simple (en memoria; en prod usa Redis/DB) ======
+const seenEvents = new Set();
 
-  RENDER_EXTERNAL_URL,
-  SUCCESS_URL,
-
-  // Gmail (SMTP)
-  GMAIL_USER,
-  GMAIL_PASS,
-  FROM_EMAIL, // Ej: NAZA Trading Academy <alexzaldivar639@gmail.com>
-
-  // Firma de Whop (opcional PRO)
-  WHOP_SIGNING_SECRET,
-
-  // Enlaces para el correo de bienvenida
-  DISCORD_DOWNLOAD_URL = 'https://discord.com/download',
-  DISCORD_TUTORIAL_URL = 'https://youtu.be/_51EAeKtTs0',
-  WHATSAPP_URL = 'https://chat.whatsapp.com/EEgZlswrpjT2Jgv9ZWKgu5?mode=wwt',
-  TELEGRAM_URL = 'https://t.me/NASATRADINGACADEMI',
-
-  // Activos visuales (hosteados en Supabase Storage)
-  LOGO_URL = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg',
-  FOOTER_IMAGE_URL = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/baner/WhatsApp%20Image%202025-11-03%20at%209.29.04%20PM.jpeg',
-
-  // Íconos (puedes sobreescribir con variables)
-  ICON_WHATSAPP_URL = 'https://cdn-icons-png.flaticon.com/512/733/733585.png',
-  ICON_TELEGRAM_URL = 'https://cdn-icons-png.flaticon.com/512/2111/2111646.png',
-
-  TEST_MODE
-} = process.env;
-
-// ==========================
-// SUPABASE
-// ==========================
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
-
-async function linkGet(membership_id) {
-  const { data, error } = await supabase
-    .from('membership_links')
-    .select('membership_id, discord_id')
-    .eq('membership_id', membership_id)
-    .maybeSingle();
-  if (error) { console.log('supabase linkGet error:', error.message); return null; }
-  return data || null;
+// ====== Parsers ======
+// Guardar raw body SOLO para /webhooks/whop (necesario para verificar firma)
+function rawBodySaver(req, res, buf) {
+  if (buf && buf.length) req.rawBody = buf;
 }
-
-async function linkSet(membership_id, discord_id) {
-  const { error } = await supabase
-    .from('membership_links')
-    .upsert({ membership_id, discord_id }, { onConflict: 'membership_id' });
-  if (error) console.log('supabase linkSet error:', error.message);
-}
-
-async function claimAlreadyUsed(membership_id, jti) {
-  if (!jti) return false;
-  const { error } = await supabase
-    .from('claims_used')
-    .insert({ jti, membership_id });
-  if (!error) return false;                // primera vez
-  if (error.code === '23505') return true; // duplicado → ya usado
-  console.log('supabase claimAlreadyUsed error:', error.message);
-  return true;
-}
-
-// ===== Dedupe de webhooks (Whop) + logs
-function getEventIdFromWhop(body) {
-  const c = [
-    body?.id,
-    body?.event_id,
-    body?.eventId,
-    body?.data?.id,
-    body?.data?.payment_id,
-    body?.data?.membership_id
-  ].filter(Boolean);
-  if (c.length) return String(c[0]);
-  return crypto.createHash('sha256').update(JSON.stringify(body || {})).digest('hex');
-}
-
-async function ensureEventNotProcessedAndLog({ event_id, event_type, body }) {
-  const { error } = await supabase
-    .from('webhook_logs')
-    .insert({ event_id, event_type, data: body || null });
-  if (!error) return { isDuplicate: false };
-  if (error.code === '23505') return { isDuplicate: true }; // unique_violation
-  console.log('supabase webhook_logs insert error:', error.message);
-  return { isDuplicate: true, error };
-}
-
-// ==========================
-// DISCORD (Ping/Pong)
-// ==========================
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ],
-  partials: [Partials.GuildMember]
-});
-
-client.once('ready', () => {
-  console.log('✅ Bot conectado como', client.user.tag);
-});
-
-client.on('messageCreate', async (msg) => {
-  try {
-    if (msg.author.bot) return;
-    if (!msg.guild) return;
-    const content = (msg.content || '').trim().toLowerCase();
-    if (content === 'ping' || content === '(ping)') {
-      await msg.reply('pong 🏓');
-    }
-  } catch (e) {
-    console.log('Error en messageCreate:', e?.message || e);
+app.use((req, res, next) => {
+  if (req.path === "/webhooks/whop") {
+    express.json({ verify: rawBodySaver })(req, res, next);
+  } else {
+    express.json()(req, res, next);
   }
 });
 
-async function addRoleIfMember(guildId, roleId, userId) {
+// ====== Salud ======
+app.get("/health", (_req, res) =>
+  res.status(200).json({ ok: true, ts: new Date().toISOString() })
+);
+
+// ====== Página pospago (oscuro NAZA/FDX) ======
+app.get("/redirect", (_req, res) => {
+  const html = `
+<!doctype html><html lang="es"><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Aviso • NAZA Trading Academy</title>
+<style>
+  :root{--bg:#0b0d10;--card:#0f1217;--border:#1b212a;--text:#e6e9ef;--muted:#98a1b3;--pill:#2a3240;--pillOn:#3b4557;--btn:#2b6cff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Arial,sans-serif}
+  .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+  .card{width:100%;max-width:720px;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px}
+  h2{margin:0 0 10px;font-weight:700;letter-spacing:.2px}
+  p{margin:0 0 10px;line-height:1.55}
+  .pill{display:inline-block;border:1px solid var(--pill);border-radius:999px;padding:10px 18px;background:var(--bg);color:var(--text);cursor:pointer;transition:all .15s ease}
+  .btn{padding:12px 18px;border:0;border-radius:10px;background:var(--btn);color:#fff;font-weight:600}
+  .btn[disabled]{opacity:.45;cursor:not-allowed;box-shadow:none}
+  .hint{margin-top:10px;color:var(--muted);font-size:14px}
+</style>
+<div class="wrap"><div class="card">
+  <h2>Aviso antes de continuar</h2>
+  <p><strong>Compra exitosa.</strong> Enviamos un correo con tus accesos. Revisa también <strong>Spam</strong> o <strong>Promociones</strong>.</p>
+  <p><strong>NAZA Trading Academy</strong> tiene carácter <strong>únicamente educativo</strong>, no garantiza resultados ni brinda asesoría financiera. Cada decisión y resultado derivado del uso del contenido es responsabilidad del usuario.</p>
+
+  <button id="accept-pill" class="pill">/Acepto/</button>
+
+  <div style="margin-top:16px">
+    <button id="continue-btn" class="btn" type="button" disabled>Obtener acceso ahora</button>
+  </div>
+
+  <p class="hint">También puedes continuar desde el correo (busca “NAZA Trading Academy” o “Whop”).</p>
+</div></div>
+
+<script>
+(function(){
+  const accept = document.getElementById('accept-pill');
+  const go = document.getElementById('continue-btn');
+
+  accept.addEventListener('click', function () {
+    const accepted = accept.getAttribute('aria-pressed') === 'true' ? false : true;
+    accept.setAttribute('aria-pressed', accepted);
+    accept.style.background = accepted ? '#10151c' : '#0b0d10';
+    accept.style.borderColor = accepted ? '#3b4557' : '#2a3240';
+    accept.style.transform = accepted ? 'translateY(-1px)' : 'translateY(0)';
+    go.disabled = !accepted;
+    go.style.opacity = accepted ? '1' : '.45';
+    go.style.cursor = accepted ? 'pointer' : 'not-allowed';
+    go.style.boxShadow = accepted ? '0 6px 16px rgba(43,108,255,.35)' : 'none';
+  });
+
+  go.addEventListener('click', function () {
+    if (go.disabled) return;
+    window.location.href = ${JSON.stringify(ACCESS_CONTINUE_URL)};
+  });
+})();
+</script>`;
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.status(200).send(html);
+});
+
+// ====== Webhook Whop (firma + eventos + rol) ======
+app.post("/webhooks/whop", async (req, res) => {
   try {
-    const guild = await client.guilds.fetch(guildId);
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (!member) {
-      console.log('⚠️ Usuario no está en el servidor. userId=', userId);
-      return { ok: false, reason: 'not_in_guild' };
+    // 1) Verificar firma HMAC
+    if (!WHOP_WEBHOOK_SECRET) {
+      console.error("WHOP_WEBHOOK_SECRET faltante");
+      return res.status(500).send("secret missing");
     }
-    if (!member.roles.cache.has(roleId)) await member.roles.add(roleId);
-    console.log('✅ Rol asignado a', userId);
-    return { ok: true };
-  } catch (e) {
-    console.error('❌ Error asignando rol:', e?.message || e);
-    return { ok: false, reason: 'error' };
+    const raw = req.rawBody?.toString("utf8") || "";
+    const signatureHeader =
+      req.get("Whop-Signature") ||
+      req.get("X-Whop-Signature") ||
+      req.get("Whop-Webhook-Signature");
+    if (!signatureHeader) {
+      console.warn("Firma Whop ausente");
+      return res.status(400).send("missing signature");
+    }
+    const expected = crypto
+      .createHmac("sha256", WHOP_WEBHOOK_SECRET)
+      .update(raw)
+      .digest("hex");
+    if (!timingSafeEqual(expected, signatureHeader)) {
+      console.warn("Firma inválida");
+      return res.status(400).send("invalid signature");
+    }
+
+    // 2) Idempotencia
+    const eventId =
+      req.get("Whop-Event-Id") ||
+      req.body?.id ||
+      req.body?.event_id ||
+      `no-id-${Date.now()}`;
+    if (seenEvents.has(eventId)) {
+      return res.status(200).json({ ok: true, dedup: true });
+    }
+    seenEvents.add(eventId);
+
+    // 3) Parse evento
+    const type = req.body?.type || req.body?.event || "unknown";
+    const data = req.body?.data || req.body?.payload || req.body;
+    const custom = data?.custom_fields || data?.customFields || {};
+    const discordIdRaw =
+      custom.discord_id ??
+      custom.DISCORD_ID ??
+      custom.discordId ??
+      data?.discord_id ??
+      null;
+    const discordId = normalizeDiscordId(discordIdRaw);
+
+    // 4) Acciones por evento
+    const assignEvents = new Set([
+      "purchase.created",
+      "subscription.activated",
+      "subscription.trial_started",
+    ]);
+    const revokeEvents = new Set([
+      "subscription.canceled",
+      "license.revoked",
+      "order.refunded",
+      "subscription.expired",
+    ]);
+
+    if (assignEvents.has(type)) {
+      if (!discordId) {
+        console.warn("assign: discord_id faltante", { type });
+      } else {
+        await discordAddRole(DISCORD_GUILD_ID, discordId, DISCORD_ROLE_ID_PRO);
+        console.log("ASSIGN_OK", { type, discordId });
+      }
+    } else if (revokeEvents.has(type)) {
+      if (!discordId) {
+        console.warn("revoke: discord_id faltante", { type });
+      } else {
+        await discordRemoveRole(DISCORD_GUILD_ID, discordId, DISCORD_ROLE_ID_PRO);
+        console.log("REVOKE_OK", { type, discordId });
+      }
+    } else {
+      console.log("EVENT_IGNORED", { type });
+    }
+
+    // 5) Respuesta rápida
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("WHOP_WEBHOOK_ERROR", err);
+    // Opcional: devolver 200 para que Whop no reintente agresivo
+    return res.status(200).json({ ok: false, error: "internal" });
   }
-}
+});
 
-async function joinGuildAndRoleWithAccessToken(guildId, roleId, userId, accessToken, botToken) {
+// ====== Utils ======
+function timingSafeEqual(a, b) {
   try {
-    const putRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bot ${botToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ access_token: accessToken })
-    });
-    if (![201, 204].includes(putRes.status)) {
-      const txt = await putRes.text().catch(() => '');
-      console.log('⚠️ No se pudo unir al guild. status=', putRes.status, txt);
-    }
-
-    const roleRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bot ${botToken}` }
-    });
-    if (roleRes.status !== 204) {
-      const txt = await roleRes.text().catch(() => '');
-      console.log('⚠️ No se pudo asignar rol tras join. status=', roleRes.status, txt);
-      return false;
-    }
-
-    console.log('✅ Usuario unido/asignado rol vía OAuth2:', userId);
-    return true;
-  } catch (e) {
-    console.error('❌ Error en joinGuildAndRoleWithAccessToken:', e?.message || e);
+    const aBuf = Buffer.from(a, "utf8");
+    const bBuf = Buffer.from(b, "utf8");
+    if (aBuf.length !== bBuf.length) return false;
+    return crypto.timingSafeEqual(aBuf, bBuf);
+  } catch {
     return false;
   }
 }
 
-// ==========================
-// Email (SMTP Gmail) + Template
-// ==========================
-const mailer = (GMAIL_USER && GMAIL_PASS)
-  ? nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: { user: GMAIL_USER, pass: GMAIL_PASS }
-    })
-  : null;
-
-async function sendEmail(to, { subject, html }) {
-  if (!mailer) {
-    console.log('📧 [FAKE EMAIL] →', to, '|', subject);
-    return;
-  }
-  try {
-    const info = await mailer.sendMail({
-      from: FROM_EMAIL || GMAIL_USER,
-      to,
-      subject,
-      html
-    });
-    console.log('📧 Email enviado:', info.messageId, '→', to);
-  } catch (e) {
-    console.log('❌ Error enviando email:', e?.message || e);
-  }
+function normalizeDiscordId(x) {
+  if (!x) return null;
+  const s = String(x).trim();
+  const id = s.replace(/\D/g, "");
+  // Discord snowflake: 17–19 dígitos
+  if (id.length < 17 || id.length > 19) return null;
+  return id;
 }
 
-function buildWelcomeEmailHTML({
-  username = 'Trader',
-  claimLink,
-  discordDownloadUrl = DISCORD_DOWNLOAD_URL,
-  discordTutorialUrl = DISCORD_TUTORIAL_URL,
-  whatsappUrl = WHATSAPP_URL,
-  telegramUrl = TELEGRAM_URL,
-  logoUrl = LOGO_URL,
-  footerImageUrl = FOOTER_IMAGE_URL
-} = {}) {
-  const btn = 'display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;';
-  const p = 'margin:0 0 14px;line-height:1.6;';
-
-  return `
-  <div style="margin:0;padding:0;background:#0b0f17;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" bgcolor="#0b0f17" style="background:#0b0f17;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="680" cellspacing="0" cellpadding="0" style="width:680px;max-width:680px;background:#0b0f17;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
-            <tr>
-              <td align="center" style="padding:28px 24px 8px;">
-                <img src="${logoUrl}" alt="Logo" style="height:64px;border-radius:14px;border:1px solid #1f2937;display:block;">
-              </td>
-            </tr>
-            <tr>
-              <td align="center" style="padding:0 24px 4px;">
-                <h2 style="margin:6px 0 0;font-size:22px;color:#ffffff;">NAZA Trading Academy</h2>
-              </td>
-            </tr>
-
-            <tr><td style="height:10px;"></td></tr>
-
-            <tr>
-              <td style="padding:0 24px;">
-                <p style="${p}">¡Bienvenido, <b>${username}</b>! 🎉 Te felicito por dar este paso. Desde hoy formas parte de la comunidad enfocada en <b>libertad, resultados reales y crecimiento constante</b>.</p>
-                <p style="${p}">Aquí encontrarás todo el <b>contenido, clases y señales</b> que te ayudarán a operar con claridad y confianza.</p>
-
-                <div style="margin:18px 0 8px">
-                  <p style="${p}"><b>Nota importante:</b> usa el <b>mismo correo</b> con el que realizaste la compra al crear tu cuenta de Discord.</p>
-                </div>
-
-                <div style="margin:18px 0">
-                  <a href="${discordDownloadUrl}" style="${btn}background:#6366f1;color:#fff">Descargar Discord</a>
-                </div>
-                <div style="margin:8px 0 20px">
-                  <a href="${discordTutorialUrl}" style="${btn}background:#0ea5e9;color:#fff">Ver cómo crear tu cuenta</a>
-                </div>
-
-                <div style="margin:22px 0">
-                  <p style="${p}">Si al pagar no conectaste tu Discord, reclámalo aquí:</p>
-                  <a href="${claimLink}" style="${btn}background:#16a34a;color:#0b0f17">Acceso al servidor (activar rol)</a>
-                  <p style="margin:8px 0 0;color:#9ca3af;font-size:12px">Enlace de un solo uso, expira en <b>24 horas</b>.</p>
-                </div>
-
-                <hr style="border:none;border-top:1px solid #1f2937;margin:26px 0" />
-
-                <p style="${p}"><b>Comunidades privadas</b></p>
-                <div style="margin:10px 0 24px">
-                  <a href="${whatsappUrl}" style="${btn}background:#22c55e;color:#0b0f17;margin-right:8px">WhatsApp</a>
-                  <a href="${telegramUrl}" style="${btn}background:#8b5cf6;color:#0b0f17">Telegram</a>
-                </div>
-
-                <p style="color:#9ca3af;font-size:12px;margin-top:10px">Si no solicitaste este acceso, ignora este correo.</p>
-              </td>
-            </tr>
-
-            <tr>
-              <td align="center" style="padding:0;">
-                <img src="${footerImageUrl}" alt="Banner" style="width:100%;max-width:680px;height:auto;display:block;margin:0 auto;object-fit:contain;opacity:.95;border:0;">
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </div>`;
-}
-// ==========================
-// Express middlewares / health
-// ==========================
-const rawBodySaver = (req, res, buf) => { req.rawBody = buf };
-app.use(bodyParser.json({ type: '*/*', verify: rawBodySaver }));
-
-app.get('/', (_req, res) => res.status(200).send('NAZA.fx BOT up ✔'));
-
-// Firma Whop (opcional)
-function verifyWhopSignature(req) {
-  if (!WHOP_SIGNING_SECRET) return true;
-  const signature = req.get('Whop-Signature') || req.get('X-Whop-Signature');
-  if (!signature) return false;
-  const hmac = crypto.createHmac('sha256', WHOP_SIGNING_SECRET);
-  hmac.update(req.rawBody || Buffer.from(''));
-  const expected = hmac.digest('hex');
-  return expected === signature;
-}
-
-// ==========================
-// OAuth2 Discord (protegido con claim)
-// ==========================
-function requireClaim(req, res, next) {
-  const { claim } = req.query || {};
-  if (!claim) return res.status(401).send('🔒 Link inválido. Revisa tu correo de compra para reclamar acceso.');
-  try {
-    const payload = jwt.verify(claim, JWT_SECRET); // { whop_user_id, membership_id, jti, iat, exp }
-    req.claim = payload;
-    return next();
-  } catch {
-    return res.status(401).send('⛔ Claim inválido o vencido. Pide un nuevo enlace.');
+// ====== Discord (REST v10) ======
+// Node 18+ tiene fetch global
+async function discordAddRole(guildId, userId, roleId) {
+  if (!DISCORD_BOT_TOKEN || !guildId || !userId || !roleId) {
+    throw new Error("DISCORD_ENV_MISSING");
   }
-}
-
-app.get('/discord/login', requireClaim, (req, res) => {
-  try {
-    const state = jwt.sign(
-      { ts: Date.now(), whop_user_id: req.claim.whop_user_id, membership_id: req.claim.membership_id, jti: req.claim.jti || null },
-      JWT_SECRET,
-      { expiresIn: '10m' }
-    );
-    const params = new URLSearchParams({
-      client_id: DISCORD_CLIENT_ID,
-      redirect_uri: DISCORD_REDIRECT_URI,
-      response_type: 'code',
-      scope: 'identify guilds.join',
-      state
-    });
-    const url = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
-    return res.redirect(url);
-  } catch (e) {
-    console.error('❌ Error en /discord/login:', e?.message || e);
-    return res.status(500).send('OAuth error');
-  }
-});
-
-app.get('/discord/callback', async (req, res) => {
-  try {
-    const { code, state } = req.query;
-    if (!code) return res.status(400).send('Falta "code"');
-    const st = jwt.verify(state, JWT_SECRET);
-
-    const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: DISCORD_CLIENT_ID,
-        client_secret: DISCORD_CLIENT_SECRET,
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: DISCORD_REDIRECT_URI
-      })
-    });
-    if (!tokenRes.ok) {
-      const txt = await tokenRes.text().catch(() => '');
-      console.log('⚠️ token exchange failed:', tokenRes.status, txt);
-      return res.status(400).send('⚠️ Error al obtener tokens de Discord.');
-    }
-    const tokens = await tokenRes.json();
-    const accessToken = tokens.access_token;
-
-    const meRes = await fetch('https://discord.com/api/v10/users/@me', {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    });
-    if (!meRes.ok) {
-      const txt = await meRes.text().catch(() => '');
-      console.log('⚠️ users/@me failed:', meRes.status, txt);
-      return res.status(400).send('⚠️ Error al leer tu usuario de Discord.');
-    }
-    const me = await meRes.json();
-
-    const existing = await linkGet(st.membership_id);
-    if (existing && existing.discord_id && existing.discord_id !== me.id) {
-      return res.status(403).send('⛔ Esta membresía ya está vinculada a otra cuenta de Discord.');
-    }
-
-    if (await claimAlreadyUsed(st.membership_id, st.jti)) {
-      return res.status(409).send('⛔ Este enlace ya fue usado.');
-    }
-
-    const ok = await joinGuildAndRoleWithAccessToken(GUILD_ID, ROLE_ID, me.id, accessToken, DISCORD_BOT_TOKEN);
-    if (!ok) return res.status(200).send('⚠️ Autorizado, pero no se pudo asignar el rol. Tu ID: ' + me.id);
-
-    if (!existing || !existing.discord_id) await linkSet(st.membership_id, me.id);
-
-    return res.status(200).send('✅ Acceso concedido. Revisa Discord.');
-  } catch (e) {
-    console.error('❌ Error en /discord/callback:', e?.message || e);
-    return res.status(500).send('⚠️ Error al conectar Discord.');
-  }
-});
-
-// ==========================
-// Webhook Whop
-// ==========================
-const okEvents = new Set(['payment_succeeded', 'membership_activated', 'membership_went_valid']);
-const cancelEvents = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
-
-function newClaim({ membership_id, whop_user_id }) {
-  return jwt.sign({ membership_id, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '24h' });
-}
-
-app.post('/webhook/whop', async (req, res) => {
-  try {
-    if (!verifyWhopSignature(req)) {
-      console.log('⛔ Firma de Whop inválida');
-      return res.status(401).json({ error: 'invalid_signature' });
-    }
-
-    const body = req.body || {};
-    an = body?.action || body?.event;
-
-    const event_id = getEventIdFromWhop(body);
-    const dedupe = await ensureEventNotProcessedAndLog({ event_id, event_type: an || 'unknown', body });
-    if (dedupe.isDuplicate) {
-      console.log('🚫 Webhook duplicado ignorado. event_id=', event_id, 'action=', an);
-      return res.status(200).json({ status: 'duplicate_ignored' });
-    }
-
-    const email = body?.data?.user?.email || body?.data?.email || null;
-    const whop_user_id  = body?.data?.user?.id || body?.data?.user_id || null;
-    const membership_id = body?.data?.id || body?.data?.membership_id || null;
-
-    console.log('📦 Webhook Whop:', { action: an, email, whop_user_id, membership_id });
-
-    if (okEvents.has(an)) {
-      const linked = membership_id ? await linkGet(membership_id) : null;
-      if (linked?.discord_id) {
-        await addRoleIfMember(GUILD_ID, ROLE_ID, linked.discord_id);
-        return res.json({ status: 'role_ensured' });
-      }
-      if (email && whop_user_id && membership_id) {
-        const claim = newClaim({ membership_id, whop_user_id });
-        const base = SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
-        const link = `${base}?claim=${claim}`;
-
-        const html = buildWelcomeEmailHTML({
-          username: body?.data?.user?.username || body?.data?.user?.name || 'Trader',
-          claimLink: link
-        });
-
-        await sendEmail(email, {
-          subject: `${APP_NAME} — Acceso y pasos (Discord)`,
-          html
-        });
-
-        console.log('🔗 Link generado para', email, link);
-        return res.json({ status: 'claim_sent', email });
-      }
-      return res.json({ status: 'no_email_or_ids' });
-    }
-
-    if (cancelEvents.has(an)) {
-      const linked = membership_id ? await linkGet(membership_id) : null;
-      if (linked?.discord_id) {
-        const url = `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${linked.discord_id}/roles/${ROLE_ID}`;
-        const del = await fetch(url, { method: 'DELETE', headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}` } });
-        if (del.status === 204) console.log('🗑️ Rol revocado por cancelación/expiración:', linked.discord_id);
-      } else {
-        console.log('ℹ️ Cancelación sin vínculo — no se pudo revocar rol.');
-      }
-      return res.json({ status: 'role_removed' });
-    }
-
-    return res.status(202).json({ status: 'ignored' });
-  } catch (e) {
-    console.error('❌ Error en /webhook/whop:', e?.message || e);
-    return res.status(500).json({ error: 'server_error' });
-  }
-});
-
-// ==========================
-// Rutas TEST (habilitar con TEST_MODE=true)
-// ==========================
-if (TEST_MODE === 'true') {
-  app.get('/test-claim', (req, res) => {
-    const claim = jwt.sign(
-      { membership_id: 'TEST-' + Date.now(), whop_user_id: 'TEST', jti: crypto.randomUUID() },
-      JWT_SECRET,
-      { expiresIn: '10m' }
-    );
-    const base = SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`;
-    const link = `${base}?claim=${claim}`;
-    console.log('🔗 Link de prueba:', link);
-    res.status(200).send(`Link de prueba:<br><a href="${link}">${link}</a><br>(expira en 10 minutos)`);
+  const url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
   });
-
-  app.get('/email-preview', (req, res) => {
-    const claimLink = `${SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`}?claim=FAKE.TEST.CLAIM`;
-    const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink });
-    res.set('Content-Type', 'text/html').send(html);
-  });
-
-  // prueba directa de envío SMTP
-  app.get('/send-test', async (req, res) => {
-    const to = (req.query.to || GMAIL_USER || '').toString();
-    if (!to) return res.status(400).send('Falta ?to=');
-    const claimLink = `${SUCCESS_URL || `https://${(RENDER_EXTERNAL_URL || '').replace(/^https?:\/\//,'')}/discord/login`}?claim=FAKE.TEST.CLAIM`;
-    const html = buildWelcomeEmailHTML({ username: 'NAZA Tester', claimLink });
-    await sendEmail(to, { subject: `${APP_NAME} — Prueba de correo`, html });
-    res.send('OK, correo de prueba enviado (revisa inbox/spam).');
-  });
-
-  // verificación SMTP (muestra error/ok en navegador)
-  app.get('/smtp-verify', async (_req, res) => {
-    if (!mailer) return res.status(200).send('Mailer inactivo (faltan GMAIL_USER/GMAIL_PASS)');
-    try {
-      await mailer.verify();
-      res.status(200).send('SMTP OK ✅');
-    } catch (e) {
-      res.status(500).send('SMTP ERROR: ' + (e?.message || e));
-    }
-  });
+  if (!res.ok) {
+    const body = await safeText(res);
+    throw new Error(\`ADD_ROLE_FAIL \${res.status}: \${body}\`);
+  }
 }
 
-// ==========================
-// Start server + Login bot
-// ==========================
-const PORT = process.env.PORT || 3000;
+async function discordRemoveRole(guildId, userId, roleId) {
+  if (!DISCORD_BOT_TOKEN || !guildId || !userId || !roleId) {
+    throw new Error("DISCORD_ENV_MISSING");
+  }
+  const url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+  });
+  if (!res.ok) {
+    const body = await safeText(res);
+    if (res.status === 404) { // ya no está el rol o miembro
+      console.warn("REMOVE_ROLE_404", body);
+      return;
+    }
+    throw new Error(\`REMOVE_ROLE_FAIL \${res.status}: \${body}\`);
+  }
+}
+
+async function safeText(res) {
+  try { return await res.text(); } catch { return ""; }
+}
+
+// ====== Start ======
 app.listen(PORT, () => {
-  console.log(`🟢 Servidor web activo en puerto ${PORT}`);
+  console.log(\`NAZA.fx BOT running on \${BASE_URL} (port \${PORT})\`);
+  console.log(\`Redirect page: \${BASE_URL}/redirect\`);
+  console.log(\`Webhook path:  \${BASE_URL}/webhooks/whop\`);
 });
-
-client.login(DISCORD_BOT_TOKEN);
