@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
-// fetch (Node 18+ trae global; este polyfill sirve por si acaso)
+// fetch (Node 18+ ya trae global; polyfill por si acaso)
 const fetch = globalThis.fetch || ((...a) => import('node-fetch').then(({ default: f }) => f(...a)));
 
 const app = express();
@@ -144,7 +144,7 @@ app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOStrin
 /* ========= Página post-pago (T&C) ========= */
 app.get('/redirect', (req, res) => {
   const { claim = '', email = '', order_id = '' } = req.query || {};
-  const page = `
+  res.set('Content-Type', 'text/html').send(`
   <!doctype html><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${APP_NAME} • Último paso</title>
   <style>
@@ -155,8 +155,8 @@ app.get('/redirect', (req, res) => {
     .pill{display:inline-block;border:1px solid #2a3240;border-radius:999px;padding:10px 18px;background:#0b0d10;cursor:pointer}
     .btn{padding:12px 18px;border:0;border-radius:10px;background:#2b6cff;color:#fff;font-weight:700}
     .btn[disabled]{opacity:.45;cursor:not-allowed}
+    .alert{margin-top:16px;padding:12px 14px;border-radius:10px;background:#3a1111;color:#fff;border:1px solid #621a1a}
     .hint{margin-top:10px;color:#98a1b3;font-size:14px}
-    .bad{margin-top:16px;padding:12px 14px;border-radius:10px;background:#3b0f13;color:#fff;border:1px solid #5a1a21}
   </style>
   <div class="wrap"><div class="card">
     <h2>Último paso para activar tu acceso</h2>
@@ -165,7 +165,7 @@ app.get('/redirect', (req, res) => {
 
     <button id="accept" class="pill" aria-pressed="false">Acepto Términos y Condiciones</button>
     <div style="margin-top:16px"><button id="go" class="btn" disabled>Conectar con Discord</button></div>
-    <div id="err" class="bad" style="display:none">Aún no tenemos tu enlace seguro. Usa tu correo para generarlo o revisa tu email.</div>
+    <div id="msg" class="alert" style="display:none"></div>
     <p class="hint">Si el botón no se habilita todavía, abre el enlace del correo de bienvenida.</p>
   </div></div>
 
@@ -175,7 +175,9 @@ app.get('/redirect', (req, res) => {
     let claim      = ${JSON.stringify(claim)};
     const go = document.getElementById('go');
     const accept = document.getElementById('accept');
-    const err = document.getElementById('err');
+    const msg = document.getElementById('msg');
+
+    function showError(t){ msg.textContent=t; msg.style.display='block'; }
 
     accept.addEventListener('click', async ()=>{
       const on = accept.getAttribute('aria-pressed') !== 'true';
@@ -190,19 +192,20 @@ app.get('/redirect', (req, res) => {
             body: JSON.stringify({ order_id, email })
           });
           const j = await r.json();
-          if (r.ok && j.claim) { claim = j.claim; err.style.display='none'; }
-          else { err.style.display='block'; }
-        } catch (e) { err.style.display='block'; }
+          if (r.ok && j.claim) claim = j.claim;
+          else showError('Aún no tenemos tu enlace seguro. Usa tu correo para generarlo o revisa tu email.');
+        } catch (e) {
+          showError('No se pudo generar tu enlace seguro aún. Revisa tu correo de bienvenida.');
+        }
       }
     });
 
     go.addEventListener('click', ()=>{
       if (go.disabled) return;
-      if (!claim) { err.style.display='block'; return; }
+      if (!claim) { showError('Aún no tenemos tu enlace seguro. Usa tu correo para generarlo o revisa tu email.'); return; }
       window.location.href = '/discord/login?claim=' + encodeURIComponent(claim);
     });
-  </script>`;
-  res.set('Content-Type','text/html').send(page);
+  </script>`);
 });
 
 /* ========= Seguridad: requireClaim para OAuth ========= */
@@ -287,95 +290,90 @@ app.get('/discord/callback', async (req, res) => {
   }
 });
 
-/* ========= Emisión de claim tras aceptar T&C (ventana 24h + match robusto) ========= */
-app.post('/api/claim/issue', async (req,res)=>{
-  try{
+/* ========= Claim tras TyC ========= */
+app.post('/api/claim/issue', async (req, res) => {
+  try {
     const { order_id, email } = req.body || {};
-    if (!order_id || !email) return res.status(400).json({ error:'order_id y email requeridos' });
+    if (!order_id || !email) return res.status(400).json({ error: 'order_id y email requeridos' });
 
-    const okEvents = ['payment_succeeded','membership_activated','membership_went_valid'];
-    const since = new Date(Date.now() - 24*60*60*1000).toISOString(); // 24h
+    const okEvents = ['payment_succeeded', 'membership_activated', 'membership_went_valid'];
+    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
 
     const { data, error } = await supabase
       .from('webhook_logs')
       .select('event_type, data, received_at')
       .gte('received_at', since)
-      .order('received_at', { ascending:false })
-      .limit(500);
+      .order('received_at', { ascending: false })
+      .limit(80);
 
-    if (error) return res.status(500).json({ error:'db_error' });
+    if (error) return res.status(500).json({ error: 'db_error' });
 
-    const eLower = String(email).trim().toLowerCase();
-    const idStr  = String(order_id).trim();
-
-    const found = (data || []).find(r=>{
-      try{
-        const d  = r.data?.data || r.data || {};
-        const em = String((d.user && d.user.email) || d.email || '').toLowerCase();
-        const id = String(d.id || d.membership_id || d.order_id || '');
-        return okEvents.includes(r.event_type) && em === eLower && id === idStr;
-      }catch{return false;}
+    const found = (data || []).find(r => {
+      try {
+        const d = r.data?.data || r.data;
+        const em = (d?.user?.email || d?.email || '').toLowerCase();
+        const id = d?.id || d?.membership_id || d?.order_id || '';
+        return okEvents.includes(r.event_type) &&
+               em === String(email).toLowerCase() &&
+               String(id) === String(order_id);
+      } catch { return false; }
     });
 
-    if (!found) return res.status(404).json({ error:'pago_no_validado' });
+    if (!found) return res.status(404).json({ error: 'pago_no_validado' });
 
     const whop_user_id  = found.data?.data?.user?.id || found.data?.data?.user_id || 'UNKNOWN';
-    const membership_id = found.data?.data?.id || found.data?.data?.membership_id || idStr;
+    const membership_id = found.data?.data?.id || found.data?.data?.membership_id || String(order_id);
 
-    const claim = jwt.sign({ membership_id, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn:'24h' });
+    const claim = jwt.sign({ membership_id, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '24h' });
     return res.json({ claim });
-  }catch(e){
+  } catch (e) {
     console.error('issue_claim error', e?.message || e);
-    res.status(500).json({ error:'server_error' });
+    res.status(500).json({ error: 'server_error' });
   }
 });
 
-/* ========= Firma Whop — acepta todos los headers comunes ========= */
-function getWhopSignature(req) {
-  // normalizamos nombres de headers a minúsculas
-  const h = Object.keys(req.headers).reduce((acc,k)=>{acc[k.toLowerCase()] = req.headers[k]; return acc;}, {});
-  return h['whop-signature']
-      || h['x-whop-signature']
-      || h['whop-webhook-signature']
-      || h['whopsignature']
-      || h['x-whopsignature']
-      || h['whop_signature']
-      || h['x-whop_signature']
-      || h['signature']
-      || null;
-}
-
-function verifyWhopV1(req) {
-  if (!WHOP_SIGNING_SECRET) return true; // para debug local
-  const sigHeader = getWhopSignature(req);
-  if (!sigHeader) { console.log('⛔ invalid_signature header: undefined'); return false; }
-
-  // Whop suele mandar "t=...,v1=HMAC" — hacemos parser tolerante
-  const parts = Object.fromEntries(
-    String(sigHeader).split(',').map(s=>{
-      const [k, ...rest] = s.trim().split('=');
-      return [k.trim(), (rest.join('=') || '').trim()];
-    })
-  );
-  const v1 = parts.v1 || String(sigHeader).trim(); // fallback si solo viene el hash
-
-  const expected = crypto.createHmac('sha256', WHOP_SIGNING_SECRET).update(req.rawBody).digest('hex');
+/* ========= Firma Whop (robusta) ========= */
+function verifyWhopSignature(req) {
   try {
-    const ok = crypto.timingSafeEqual(Buffer.from(expected,'utf8'), Buffer.from(v1,'utf8'));
-    if (!ok) console.log('⛔ invalid_signature mismatch');
+    const secret = WHOP_SIGNING_SECRET;
+    if (!secret) {
+      console.warn('⚠️ No WHOP_SIGNING_SECRET configurado (aceptando firmas en modo dev)');
+      return true;
+    }
+
+    const header =
+      req.headers['whop-signature'] ||
+      req.headers['x-whop-signature'] ||
+      req.headers['whop-signing-secret'] ||
+      req.headers['x-whop-signing-secret'] ||
+      req.headers['signature'] ||
+      req.headers['x-signature'] ||
+      '';
+
+    if (!header) {
+      console.log('⚠️ Header de firma no encontrado.');
+      return false;
+    }
+
+    const body = req.rawBody?.toString() || '';
+    const computed = crypto.createHmac('sha256', secret).update(body).digest('hex');
+
+    const ok = header.trim() === computed.trim();
+    if (!ok) console.log('❌ invalid_signature header:', header);
     return ok;
-  } catch { return false; }
+  } catch (err) {
+    console.error('verifyWhopSignature error:', err.message);
+    return false;
+  }
 }
 
-/* ========= Webhook Whop (valida HMAC + log + email backup) ========= */
-const okEvents = new Set(['payment_succeeded','membership_activated','membership_went_valid']);
-const cancelEvents = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
+const okEvents = new Set(['payment_succeeded', 'membership_activated', 'membership_went_valid']);
+const cancelEvents = new Set(['membership_cancelled', 'membership_cancelled_by_user', 'membership_expired', 'membership_deactivated']);
 
+/* ========= Webhook Whop ========= */
 app.post('/webhook/whop', async (req, res) => {
   try {
-    if (!verifyWhopV1(req)) {
-      return res.status(401).json({ error: 'invalid_signature' });
-    }
+    if (!verifyWhopSignature(req)) return res.status(401).json({ error: 'invalid_signature' });
 
     const body = JSON.parse(req.rawBody.toString('utf8'));
     const action = body?.action || body?.event || 'unknown';
@@ -411,7 +409,7 @@ app.post('/webhook/whop', async (req, res) => {
     res.json({ status: 'ignored' });
   } catch (e) {
     console.error('WHOP_WEBHOOK_ERROR', e?.message || e);
-    res.status(500).json({ error:'server_error' });
+    res.status(500).json({ error: 'server_error' });
   }
 });
 
@@ -421,49 +419,48 @@ app.post('/email/resend', async (req, res) => {
     const to = String(req.body.to || req.body.email || '').trim().toLowerCase();
     const order_id = String(req.body.order_id || '').trim();
     const username = String(req.body.username || 'Trader');
-    if (!to) return res.status(400).json({ error:'email requerido' });
+    if (!to) return res.status(400).json({ error: 'email requerido' });
     await sendAccessEmail({ to, email: to, order_id, username });
-    res.json({ ok:true });
+    res.json({ ok: true });
   } catch (e) {
     console.error('email/resend error', e?.message || e);
-    res.status(500).json({ error:'server_error' });
+    res.status(500).json({ error: 'server_error' });
   }
 });
 
-/* ========= DEBUG ROUTES (quítalas al lanzar) ========= */
+/* ========= DEBUG ROUTES (útiles en pruebas) ========= */
 
-// 1) Verificar SMTP (Gmail)
+// Verificar SMTP (Gmail)
 app.get('/smtp-verify', async (_req, res) => {
   try {
-    if (!GMAIL_USER || !GMAIL_PASS) {
-      return res.status(200).send('Mailer inactivo: faltan GMAIL_USER/GMAIL_PASS');
-    }
+    if (!GMAIL_USER || !GMAIL_PASS) return res.status(200).send('Mailer inactivo: faltan GMAIL_USER/GMAIL_PASS');
     const transport = nodemailer.createTransport({
       host: 'smtp.gmail.com', port: 465, secure: true,
       auth: { user: GMAIL_USER, pass: GMAIL_PASS }
     });
     await transport.verify();
     res.send('SMTP OK ✅');
-  } catch (e) {
-    res.status(500).send('SMTP ERROR: ' + (e?.message || e));
-  }
+  } catch (e) { res.status(500).send('SMTP ERROR: ' + (e?.message || e)); }
 });
 
-// 2) Ver últimos eventos guardados por el webhook
+// Últimos eventos guardados por el webhook
 app.get('/debug/webhook-logs', async (_req, res) => {
   try {
     const { data, error } = await supabase.from('webhook_logs')
       .select('event_type, received_at')
       .order('received_at', { ascending: false })
-      .limit(50);
+      .limit(10);
     if (error) return res.status(500).json({ error: error.message });
     res.json(data || []);
-  } catch (e) {
-    res.status(500).json({ error: e?.message || String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
-// 3) Simular un webhook OK (para pruebas sin depender de Whop)
+// Vista simple para verificar la firma manual (GET informativo)
+app.get('/debug/verify-signature', (_req, res) => {
+  res.status(200).send('Usa el webhook real de Whop para probar la firma. Esta ruta es informativa.');
+});
+
+// Simular un webhook OK (sin pagar)
 app.get('/webhook/mock', async (req, res) => {
   try {
     if (!ADMIN_TEST_TOKEN || req.query.token !== ADMIN_TEST_TOKEN) return res.status(401).send('UNAUTHORIZED');
@@ -481,36 +478,6 @@ app.get('/webhook/mock', async (req, res) => {
       await sendAccessEmail({ to: body.data.email, email: body.data.email, order_id: body.data.membership_id, username: 'Tester' });
     }
     res.json({ ok: true, inserted: body });
-  } catch (e) {
-    res.status(500).json({ error: e?.message || String(e) });
-  }
-});
-
-// 4) Diagnóstico de claim (ver si hay coincidencias para email/order_id)
-app.get('/debug/claim-check', async (req, res) => {
-  try {
-    const email = String(req.query.email || '').toLowerCase().trim();
-    const order_id = String(req.query.order_id || '').trim();
-    if (!email || !order_id) return res.status(400).json({ error: 'email y order_id requeridos' });
-
-    const since = new Date(Date.now() - 24*60*60*1000).toISOString();
-    const { data } = await supabase
-      .from('webhook_logs')
-      .select('event_type, data, received_at')
-      .gte('received_at', since)
-      .order('received_at', { ascending:false })
-      .limit(200);
-
-    const matches = (data||[]).filter(r=>{
-      try{
-        const d  = r.data?.data || r.data || {};
-        const em = String((d.user && d.user.email) || d.email || '').toLowerCase();
-        const id = String(d.id || d.membership_id || d.order_id || '');
-        return em === email && id === order_id;
-      }catch{return false;}
-    });
-
-    res.json({ email, order_id, matchesCount: matches.length, matches });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
