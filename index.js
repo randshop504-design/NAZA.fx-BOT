@@ -1,6 +1,6 @@
 // index.js
 // NAZA.fx BOT — Render server (Node 18+)
-// Instala dependencias: npm i express dotenv
+// Dependencias: npm i express dotenv
 
 const express = require("express");
 const crypto = require("crypto");
@@ -9,7 +9,7 @@ const dotenv = require("dotenv");
 dotenv.config();
 const app = express();
 
-// ====== Config ======
+// ===== Config =====
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.APP_BASE_URL || `http://localhost:${PORT}`;
 const ACCESS_CONTINUE_URL =
@@ -21,11 +21,10 @@ const DISCORD_ROLE_ID_PRO = process.env.DISCORD_ROLE_ID_PRO;
 
 const WHOP_WEBHOOK_SECRET = process.env.WHOP_WEBHOOK_SECRET;
 
-// ====== Idempotencia simple (en memoria; en prod usa Redis/DB) ======
+// Idempotencia en memoria (en prod: Redis/DB)
 const seenEvents = new Set();
 
-// ====== Parsers ======
-// Guardar raw body SOLO para /webhooks/whop (necesario para verificar firma)
+// ===== Body parsers =====
 function rawBodySaver(req, res, buf) {
   if (buf && buf.length) req.rawBody = buf;
 }
@@ -37,19 +36,18 @@ app.use((req, res, next) => {
   }
 });
 
-// ====== Salud ======
+// ===== Health =====
 app.get("/health", (_req, res) =>
   res.status(200).json({ ok: true, ts: new Date().toISOString() })
 );
 
-// ====== Página pospago (oscuro NAZA/FDX) ======
+// ===== Página pospago (oscuro NAZA/FDX) =====
 app.get("/redirect", (_req, res) => {
-  const html = `
-<!doctype html><html lang="es"><meta charset="utf-8"/>
+  const html = `<!doctype html><html lang="es"><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Aviso • NAZA Trading Academy</title>
 <style>
-  :root{--bg:#0b0d10;--card:#0f1217;--border:#1b212a;--text:#e6e9ef;--muted:#98a1b3;--pill:#2a3240;--pillOn:#3b4557;--btn:#2b6cff}
+  :root{--bg:#0b0d10;--card:#0f1217;--border:#1b212a;--text:#e6e9ef;--muted:#98a1b3;--pill:#2a3240;--btn:#2b6cff}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Arial,sans-serif}
   .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
@@ -102,7 +100,7 @@ app.get("/redirect", (_req, res) => {
   res.status(200).send(html);
 });
 
-// ====== Webhook Whop (firma + eventos + rol) ======
+// ===== Webhook Whop (firma + eventos + rol) =====
 app.post("/webhooks/whop", async (req, res) => {
   try {
     // 1) Verificar firma HMAC
@@ -110,7 +108,7 @@ app.post("/webhooks/whop", async (req, res) => {
       console.error("WHOP_WEBHOOK_SECRET faltante");
       return res.status(500).send("secret missing");
     }
-    const raw = req.rawBody?.toString("utf8") || "";
+    const raw = (req.rawBody && req.rawBody.toString("utf8")) || "";
     const signatureHeader =
       req.get("Whop-Signature") ||
       req.get("X-Whop-Signature") ||
@@ -131,27 +129,26 @@ app.post("/webhooks/whop", async (req, res) => {
     // 2) Idempotencia
     const eventId =
       req.get("Whop-Event-Id") ||
-      req.body?.id ||
-      req.body?.event_id ||
+      (req.body && (req.body.id || req.body.event_id)) ||
       `no-id-${Date.now()}`;
     if (seenEvents.has(eventId)) {
       return res.status(200).json({ ok: true, dedup: true });
     }
     seenEvents.add(eventId);
 
-    // 3) Parse evento
-    const type = req.body?.type || req.body?.event || "unknown";
-    const data = req.body?.data || req.body?.payload || req.body;
-    const custom = data?.custom_fields || data?.customFields || {};
+    // 3) Parse
+    const type = (req.body && (req.body.type || req.body.event)) || "unknown";
+    const data = (req.body && (req.body.data || req.body.payload)) || req.body || {};
+    const custom = data.custom_fields || data.customFields || {};
     const discordIdRaw =
       custom.discord_id ??
       custom.DISCORD_ID ??
       custom.discordId ??
-      data?.discord_id ??
+      data.discord_id ??
       null;
     const discordId = normalizeDiscordId(discordIdRaw);
 
-    // 4) Acciones por evento
+    // 4) Ruteo
     const assignEvents = new Set([
       "purchase.created",
       "subscription.activated",
@@ -182,16 +179,16 @@ app.post("/webhooks/whop", async (req, res) => {
       console.log("EVENT_IGNORED", { type });
     }
 
-    // 5) Respuesta rápida
+    // 5) OK
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("WHOP_WEBHOOK_ERROR", err);
-    // Opcional: devolver 200 para que Whop no reintente agresivo
+    // Para evitar reintentos agresivos de Whop, respondemos 200
     return res.status(200).json({ ok: false, error: "internal" });
   }
 });
 
-// ====== Utils ======
+// ===== Utils =====
 function timingSafeEqual(a, b) {
   try {
     const aBuf = Buffer.from(a, "utf8");
@@ -212,20 +209,20 @@ function normalizeDiscordId(x) {
   return id;
 }
 
-// ====== Discord (REST v10) ======
-// Node 18+ tiene fetch global
+// ===== Discord REST v10 (Node 18+ tiene fetch global) =====
 async function discordAddRole(guildId, userId, roleId) {
   if (!DISCORD_BOT_TOKEN || !guildId || !userId || !roleId) {
     throw new Error("DISCORD_ENV_MISSING");
   }
-  const url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+  const url = "https://discord.com/api/v10/guilds/" + guildId + "/members/" + userId + "/roles/" + roleId;
   const res = await fetch(url, {
     method: "PUT",
-    headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+    headers: { Authorization: "Bot " + DISCORD_BOT_TOKEN },
   });
   if (!res.ok) {
     const body = await safeText(res);
-    throw new Error(\`ADD_ROLE_FAIL \${res.status}: \${body}\`);
+    // uso concatenación para evitar problemas de comillas/template en copiado
+    throw new Error("ADD_ROLE_FAIL " + res.status + ": " + body);
   }
 }
 
@@ -233,28 +230,32 @@ async function discordRemoveRole(guildId, userId, roleId) {
   if (!DISCORD_BOT_TOKEN || !guildId || !userId || !roleId) {
     throw new Error("DISCORD_ENV_MISSING");
   }
-  const url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+  const url = "https://discord.com/api/v10/guilds/" + guildId + "/members/" + userId + "/roles/" + roleId;
   const res = await fetch(url, {
     method: "DELETE",
-    headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+    headers: { Authorization: "Bot " + DISCORD_BOT_TOKEN },
   });
   if (!res.ok) {
     const body = await safeText(res);
-    if (res.status === 404) { // ya no está el rol o miembro
+    if (res.status === 404) {
       console.warn("REMOVE_ROLE_404", body);
       return;
     }
-    throw new Error(\`REMOVE_ROLE_FAIL \${res.status}: \${body}\`);
+    throw new Error("REMOVE_ROLE_FAIL " + res.status + ": " + body);
   }
 }
 
 async function safeText(res) {
-  try { return await res.text(); } catch { return ""; }
+  try {
+    return await res.text();
+  } catch {
+    return "";
+  }
 }
 
-// ====== Start ======
+// ===== Start =====
 app.listen(PORT, () => {
-  console.log(\`NAZA.fx BOT running on \${BASE_URL} (port \${PORT})\`);
-  console.log(\`Redirect page: \${BASE_URL}/redirect\`);
-  console.log(\`Webhook path:  \${BASE_URL}/webhooks/whop\`);
+  console.log("NAZA.fx BOT running on " + BASE_URL + " (port " + PORT + ")");
+  console.log("Redirect page: " + BASE_URL + "/redirect");
+  console.log("Webhook path:  " + BASE_URL + "/webhooks/whop");
 });
