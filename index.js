@@ -1,7 +1,6 @@
 // NAZA.fx BOT — INDEX DEFINITIVO (Node 18+)
-// Whop ↔ Render ↔ Discord + Supabase + Gmail (SMTP)
-// Flujo: pago → /webhook/whop (valida+log+email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 → entra + rol
-
+// Whop ↔ Render ↔ Discord + Supabase + Gmail
+// Flujo: pago → /webhook/whop (valida + log + email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 Discord → entra + rol
 require('dotenv').config();
 
 const express = require('express');
@@ -10,8 +9,8 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
-// Node 18+/22+ ya tiene fetch; usamos el global
-const fetch = globalThis.fetch;
+// fetch (Node 18+ ya trae global; polyfill por si acaso)
+const fetch = globalThis.fetch || ((...a) => import('node-fetch').then(({ default: f }) => f(...a)));
 
 const app = express();
 
@@ -25,17 +24,16 @@ const DISCORD_BOT_TOKEN     = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URL  = process.env.DISCORD_REDIRECT_URL || `${BASE_URL}/discord/callback`;
-const GUILD_ID              = process.env.GUILD_ID || process.env.DISCORD_GUILD_ID;
-const ROLE_ID               = process.env.ROLE_ID  || process.env.DISCORD_ROLE_ID_PRO;
+const GUILD_ID = process.env.GUILD_ID || process.env.DISCORD_GUILD_ID;
+const ROLE_ID  = process.env.ROLE_ID  || process.env.DISCORD_ROLE_ID_PRO;
 
-const WHOP_SIGNING_SECRET   = process.env.WHOP_SIGNING_SECRET || process.env.WHOP_WEBHOOK_SECRET; // usa UNO (ws_…)
-const JWT_SECRET            = process.env.JWT_SECRET || 'change-me-please-long-random';
+const WHOP_SIGNING_SECRET = process.env.WHOP_SIGNING_SECRET || process.env.WHOP_WEBHOOK_SECRET; // usa UNO (ws_…)
+const JWT_SECRET = process.env.JWT_SECRET || 'change-me-please-long-random';
 
-const SUCCESS_URL           = process.env.SUCCESS_URL || `${BASE_URL}/redirect`;
+const SUCCESS_URL = process.env.SUCCESS_URL || `${BASE_URL}/redirect`;
 
-const SUPABASE_URL          = process.env.SUPABASE_URL;
+const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
 
 /* ========= Email (Gmail) ========= */
@@ -44,9 +42,9 @@ const {
   DISCORD_DOWNLOAD_URL = 'https://discord.com/download',
   DISCORD_TUTORIAL_URL = 'https://youtu.be/_51EAeKtTs0',
   INSTAGRAM_URL = 'https://instagram.com/',
-  TIKTOK_URL    = 'https://tiktok.com/@',
-  WHATSAPP_URL  = 'https://wa.me/50400000000',
-  TELEGRAM_URL  = 'https://t.me/',
+  TIKTOK_URL = 'https://tiktok.com/@',
+  WHATSAPP_URL = 'https://wa.me/50400000000',
+  TELEGRAM_URL = 'https://t.me/',
   LOGO_URL = '',
   FOOTER_IMAGE_URL = '',
   ADMIN_TEST_TOKEN // para /webhook/mock
@@ -93,9 +91,9 @@ function buildWelcomeEmailHTML({ email, order_id, username = 'Trader' }) {
             <hr style="border:none;border-top:1px solid #2a3240;margin:22px 0">
             <div style="margin:8px 0 20px">
               <a href="${INSTAGRAM_URL}" style="${btn}background:#2a3240;color:#fff;margin-right:8px">📸 Instagram</a>
-              <a href="${TIKTOK_URL}"    style="${btn}background:#2a3240;color:#fff;margin-right:8px">🎵 TikTok</a>
-              <a href="${WHATSAPP_URL}"  style="${btn}background:#2a3240;color:#fff;margin-right:8px">💬 WhatsApp</a>
-              <a href="${TELEGRAM_URL}"  style="${btn}background:#2a3240;color:#fff">📣 Telegram</a>
+              <a href="${TIKTOK_URL}" style="${btn}background:#2a3240;color:#fff;margin-right:8px">🎵 TikTok</a>
+              <a href="${WHATSAPP_URL}" style="${btn}background:#2a3240;color:#fff;margin-right:8px">💬 WhatsApp</a>
+              <a href="${TELEGRAM_URL}" style="${btn}background:#2a3240;color:#fff">📣 Telegram</a>
             </div>
             <p style="color:#9ca3af;font-size:12px">Disclaimer: ${APP_NAME} es educativo; no es asesoría financiera.</p>
           </td></tr>
@@ -114,18 +112,13 @@ async function sendAccessEmail({ to, email, order_id, username }) {
 /* ========= Supabase helpers ========= */
 async function linkGet(membership_id) {
   if (!membership_id) return null;
-  const { data } = await supabase
-    .from('membership_links')
-    .select('membership_id, discord_id')
-    .eq('membership_id', membership_id)
-    .maybeSingle();
+  const { data } = await supabase.from('membership_links')
+    .select('membership_id, discord_id').eq('membership_id', membership_id).maybeSingle();
   return data || null;
 }
 async function linkSet(membership_id, discord_id) {
   if (!membership_id || !discord_id) return;
-  await supabase
-    .from('membership_links')
-    .upsert({ membership_id, discord_id }, { onConflict: 'membership_id' });
+  await supabase.from('membership_links').upsert({ membership_id, discord_id }, { onConflict: 'membership_id' });
 }
 async function claimAlreadyUsed(membership_id, jti) {
   if (!jti) return false;
@@ -134,30 +127,24 @@ async function claimAlreadyUsed(membership_id, jti) {
   return error.code === '23505';
 }
 async function logWebhook(event_id, event_type, data) {
-  try {
-    await supabase.from('webhook_logs').insert({ event_id, event_type, data });
-  } catch (e) {
-    console.log('webhook_logs insert error:', e?.message || e);
-  }
+  try { await supabase.from('webhook_logs').insert({ event_id, event_type, data }); }
+  catch (e) { console.log('webhook_logs insert error:', e?.message || e); }
 }
 
 /* ========= Parsers: RAW solo webhook ========= */
 function rawBodySaver(req, _res, buf) { if (buf?.length) req.rawBody = buf; }
 app.use((req, res, next) => {
-  if (req.path === '/webhook/whop') {
-    express.raw({ type: 'application/json', verify: rawBodySaver })(req, res, next);
-  } else {
-    express.json()(req, res, next);
-  }
+  if (req.path === '/webhook/whop') express.raw({ type: 'application/json', verify: rawBodySaver })(req, res, next);
+  else express.json()(req, res, next);
 });
 
 /* ========= Health ========= */
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-/* ========= Página post-pago (T&C + claim bajo demanda) ========= */
+/* ========= Página post-pago (T&C) ========= */
 app.get('/redirect', (req, res) => {
   const { claim = '', email = '', order_id = '' } = req.query || {};
-  res.set('Content-Type', 'text/html').send(`
+  const page = `
   <!doctype html><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${APP_NAME} • Último paso</title>
   <style>
@@ -168,7 +155,8 @@ app.get('/redirect', (req, res) => {
     .pill{display:inline-block;border:1px solid #2a3240;border-radius:999px;padding:10px 18px;background:#0b0d10;cursor:pointer}
     .btn{padding:12px 18px;border:0;border-radius:10px;background:#2b6cff;color:#fff;font-weight:700}
     .btn[disabled]{opacity:.45;cursor:not-allowed}
-    .note{margin-top:14px;padding:12px;border:1px solid #3b1f25;background:#2a1216;border-radius:10px;color:#f2c5c9}
+    .hint{margin-top:10px;color:#98a1b3;font-size:14px}
+    .bad{margin-top:16px;padding:12px 14px;border-radius:10px;background:#3b0f13;color:#fff;border:1px solid #5a1a21}
   </style>
   <div class="wrap"><div class="card">
     <h2>Último paso para activar tu acceso</h2>
@@ -177,7 +165,8 @@ app.get('/redirect', (req, res) => {
 
     <button id="accept" class="pill" aria-pressed="false">Acepto Términos y Condiciones</button>
     <div style="margin-top:16px"><button id="go" class="btn" disabled>Conectar con Discord</button></div>
-    <div id="warn" class="note" style="display:none">Aún no tenemos tu enlace seguro. Usa tu correo para generarlo o revisa tu email.</div>
+    <div id="err" class="bad" style="display:none">Aún no tenemos tu enlace seguro. Usa tu correo para generarlo o revisa tu email.</div>
+    <p class="hint">Si el botón no se habilita todavía, abre el enlace del correo de bienvenida.</p>
   </div></div>
 
   <script>
@@ -186,7 +175,7 @@ app.get('/redirect', (req, res) => {
     let claim      = ${JSON.stringify(claim)};
     const go = document.getElementById('go');
     const accept = document.getElementById('accept');
-    const warn = document.getElementById('warn');
+    const err = document.getElementById('err');
 
     accept.addEventListener('click', async ()=>{
       const on = accept.getAttribute('aria-pressed') !== 'true';
@@ -201,18 +190,19 @@ app.get('/redirect', (req, res) => {
             body: JSON.stringify({ order_id, email })
           });
           const j = await r.json();
-          if (r.ok && j.claim) { claim = j.claim; warn.style.display = 'none'; }
-          else { warn.style.display = 'block'; }
-        } catch { warn.style.display = 'block'; }
+          if (r.ok && j.claim) { claim = j.claim; err.style.display='none'; }
+          else { err.style.display='block'; }
+        } catch (e) { err.style.display='block'; }
       }
     });
 
     go.addEventListener('click', ()=>{
       if (go.disabled) return;
-      if (!claim) { warn.style.display = 'block'; return; }
+      if (!claim) { err.style.display='block'; return; }
       window.location.href = '/discord/login?claim=' + encodeURIComponent(claim);
     });
-  </script>`);
+  </script>`;
+  res.set('Content-Type','text/html').send(page);
 });
 
 /* ========= Seguridad: requireClaim para OAuth ========= */
@@ -250,7 +240,6 @@ app.get('/discord/callback', async (req, res) => {
     if (!code) return res.status(400).send('Falta code');
     const st = jwt.verify(state, JWT_SECRET);
 
-    // Intercambiar code por token
     const tRes = await fetch('https://discord.com/api/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -265,14 +254,12 @@ app.get('/discord/callback', async (req, res) => {
     if (!tRes.ok) return res.status(400).send('Error al obtener token');
     const { access_token } = await tRes.json();
 
-    // Info de usuario
     const meRes = await fetch('https://discord.com/api/v10/users/@me', {
       headers: { Authorization: `Bearer ${access_token}` }
     });
     if (!meRes.ok) return res.status(400).send('Error leyendo usuario');
     const me = await meRes.json();
 
-    // Antiduplicado
     if (await claimAlreadyUsed(st.membership_id, st.jti))
       return res.status(409).send('⛔ Este enlace ya fue usado.');
 
@@ -300,78 +287,75 @@ app.get('/discord/callback', async (req, res) => {
   }
 });
 
-/* ========= Emisión de claim tras TyC ========= */
-app.post('/api/claim/issue', async (req, res) => {
-  try {
-    // req.body ya parseado por express.json()
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', async () => {
-      try {
-        const { order_id, email } = JSON.parse(body || '{}');
-        if (!order_id || !email) return res.status(400).json({ error: 'order_id y email requeridos' });
+/* ========= Emisión de claim tras aceptar T&C (ventana 24h + match robusto) ========= */
+app.post('/api/claim/issue', async (req,res)=>{
+  try{
+    const { order_id, email } = req.body || {};
+    if (!order_id || !email) return res.status(400).json({ error:'order_id y email requeridos' });
 
-        const okEvents = ['payment_succeeded', 'membership_activated', 'membership_went_valid'];
-        const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    const okEvents = ['payment_succeeded','membership_activated','membership_went_valid'];
+    const since = new Date(Date.now() - 24*60*60*1000).toISOString(); // 24h
 
-        const { data, error } = await supabase
-          .from('webhook_logs')
-          .select('event_type, data, received_at')
-          .gte('received_at', since)
-          .order('received_at', { ascending: false })
-          .limit(100);
+    const { data, error } = await supabase
+      .from('webhook_logs')
+      .select('event_type, data, received_at')
+      .gte('received_at', since)
+      .order('received_at', { ascending:false })
+      .limit(500);
 
-        if (error) return res.status(500).json({ error: 'db_error' });
+    if (error) return res.status(500).json({ error:'db_error' });
 
-        const found = (data || []).find(r => {
-          try {
-            const d  = r.data?.data || r.data;
-            const em = (d?.user?.email || d?.email || '').toLowerCase();
-            const id = d?.id || d?.membership_id || d?.order_id || '';
-            return okEvents.includes(r.event_type) &&
-                   em === String(email).toLowerCase() &&
-                   String(id) === String(order_id);
-          } catch { return false; }
-        });
+    const eLower = String(email).trim().toLowerCase();
+    const idStr  = String(order_id).trim();
 
-        if (!found) return res.status(404).json({ error: 'pago_no_validado' });
-
-        const whop_user_id  = found.data?.data?.user?.id || found.data?.data?.user_id || 'UNKNOWN';
-        const membership_id = found.data?.data?.id || found.data?.data?.membership_id || String(order_id);
-
-        const claim = jwt.sign({ membership_id, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '24h' });
-        return res.json({ claim });
-      } catch (e) {
-        console.error('issue_claim parse error', e?.message || e);
-        return res.status(500).json({ error: 'server_error' });
-      }
+    const found = (data || []).find(r=>{
+      try{
+        const d  = r.data?.data || r.data || {};
+        const em = String((d.user && d.user.email) || d.email || '').toLowerCase();
+        const id = String(d.id || d.membership_id || d.order_id || '');
+        return okEvents.includes(r.event_type) && em === eLower && id === idStr;
+      }catch{return false;}
     });
-  } catch (e) {
+
+    if (!found) return res.status(404).json({ error:'pago_no_validado' });
+
+    const whop_user_id  = found.data?.data?.user?.id || found.data?.data?.user_id || 'UNKNOWN';
+    const membership_id = found.data?.data?.id || found.data?.data?.membership_id || idStr;
+
+    const claim = jwt.sign({ membership_id, whop_user_id, jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn:'24h' });
+    return res.json({ claim });
+  }catch(e){
     console.error('issue_claim error', e?.message || e);
-    res.status(500).json({ error: 'server_error' });
+    res.status(500).json({ error:'server_error' });
   }
 });
 
 /* ========= Webhook Whop (firma v1 + logging + email backup) ========= */
 function verifyWhopV1(req) {
   const sigHeader = req.get('Whop-Signature') || req.get('X-Whop-Signature');
-  if (!WHOP_SIGNING_SECRET) return true; // debug
+  if (!WHOP_SIGNING_SECRET) return true; // para debug local
   if (!sigHeader) return false;
-  // formato: "t=...,v1=abcdef..."
-  const parts = Object.fromEntries(sigHeader.split(',').map(s => s.trim().split('=')));
-  const v1 = parts.v1 || '';
+  // formato: "t=...,v1=abcdef..." (a veces vienen pares sueltos, por eso el split tolerante)
+  const pairs = Object.fromEntries(
+    sigHeader.split(',').map(s => {
+      const [k, ...rest] = s.trim().split('=');
+      return [k, (rest.join('=') || '').trim()];
+    })
+  );
+  const v1 = pairs.v1 || '';
   const expected = crypto.createHmac('sha256', WHOP_SIGNING_SECRET).update(req.rawBody).digest('hex');
-  try { return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(v1, 'utf8')); }
-  catch { return false; }
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(v1, 'utf8'));
+  } catch { return false; }
 }
 
-const OK_EVENTS     = new Set(['payment_succeeded','membership_activated','membership_went_valid']);
-const CANCEL_EVENTS = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
+const okEvents = new Set(['payment_succeeded','membership_activated','membership_went_valid']);
+const cancelEvents = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
 
 app.post('/webhook/whop', async (req, res) => {
   try {
     if (!verifyWhopV1(req)) {
-      console.log('⛔ invalid_signature:', req.get('Whop-Signature') || req.get('X-Whop-Signature'));
+      console.log('⛔ invalid_signature header:', req.get('Whop-Signature') || req.get('X-Whop-Signature'));
       return res.status(401).json({ error: 'invalid_signature' });
     }
 
@@ -381,10 +365,10 @@ app.post('/webhook/whop', async (req, res) => {
 
     await logWebhook(event_id, action, body);
 
-    const email    = body?.data?.user?.email || body?.data?.email || null;
+    const email = body?.data?.user?.email || body?.data?.email || null;
     const memberId = body?.data?.id || body?.data?.membership_id || null;
 
-    if (OK_EVENTS.has(action) && email) {
+    if (okEvents.has(action) && email) {
       await sendAccessEmail({
         to: email,
         email,
@@ -395,7 +379,7 @@ app.post('/webhook/whop', async (req, res) => {
       return res.json({ status: 'claim_email_sent' });
     }
 
-    if (CANCEL_EVENTS.has(action) && memberId) {
+    if (cancelEvents.has(action) && memberId) {
       const linked = await linkGet(memberId);
       if (linked?.discord_id) {
         await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${linked.discord_id}/roles/${ROLE_ID}`, {
@@ -409,29 +393,26 @@ app.post('/webhook/whop', async (req, res) => {
     res.json({ status: 'ignored' });
   } catch (e) {
     console.error('WHOP_WEBHOOK_ERROR', e?.message || e);
-    res.status(500).json({ error: 'server_error' });
+    res.status(500).json({ error:'server_error' });
   }
 });
 
 /* ========= Reenvío manual del correo ========= */
 app.post('/email/resend', async (req, res) => {
   try {
-    let body = '';
-    req.on('data', c => { body += c; });
-    req.on('end', async () => {
-      const { email: toRaw, order_id, username = 'Trader' } = JSON.parse(body || '{}');
-      const to = String(toRaw || '').trim().toLowerCase();
-      if (!to) return res.status(400).json({ error: 'email requerido' });
-      await sendAccessEmail({ to, email: to, order_id: String(order_id || ''), username });
-      res.json({ ok: true });
-    });
+    const to = String(req.body.to || req.body.email || '').trim().toLowerCase();
+    const order_id = String(req.body.order_id || '').trim();
+    const username = String(req.body.username || 'Trader');
+    if (!to) return res.status(400).json({ error:'email requerido' });
+    await sendAccessEmail({ to, email: to, order_id, username });
+    res.json({ ok:true });
   } catch (e) {
     console.error('email/resend error', e?.message || e);
-    res.status(500).json({ error: 'server_error' });
+    res.status(500).json({ error:'server_error' });
   }
 });
 
-/* ========= DEBUG ROUTES (puedes quitarlas al lanzar) ========= */
+/* ========= DEBUG ROUTES (quítalas cuando lances) ========= */
 
 // 1) Verificar SMTP (Gmail)
 app.get('/smtp-verify', async (_req, res) => {
@@ -439,7 +420,11 @@ app.get('/smtp-verify', async (_req, res) => {
     if (!GMAIL_USER || !GMAIL_PASS) {
       return res.status(200).send('Mailer inactivo: faltan GMAIL_USER/GMAIL_PASS');
     }
-    await mailer.verify();
+    const transport = nodemailer.createTransport({
+      host: 'smtp.gmail.com', port: 465, secure: true,
+      auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+    });
+    await transport.verify();
     res.send('SMTP OK ✅');
   } catch (e) {
     res.status(500).send('SMTP ERROR: ' + (e?.message || e));
@@ -449,11 +434,10 @@ app.get('/smtp-verify', async (_req, res) => {
 // 2) Ver últimos eventos guardados por el webhook
 app.get('/debug/webhook-logs', async (_req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('webhook_logs')
+    const { data, error } = await supabase.from('webhook_logs')
       .select('event_type, received_at')
       .order('received_at', { ascending: false })
-      .limit(10);
+      .limit(50);
     if (error) return res.status(500).json({ error: error.message });
     res.json(data || []);
   } catch (e) {
@@ -462,7 +446,6 @@ app.get('/debug/webhook-logs', async (_req, res) => {
 });
 
 // 3) Simular un webhook OK (para pruebas sin depender de Whop)
-//    Uso: /webhook/mock?email=tu@mail.com&membership_id=TEST-1&user_id=U1&action=payment_succeeded&token=EL_TOKEN
 app.get('/webhook/mock', async (req, res) => {
   try {
     if (!ADMIN_TEST_TOKEN || req.query.token !== ADMIN_TEST_TOKEN) return res.status(401).send('UNAUTHORIZED');
@@ -480,6 +463,36 @@ app.get('/webhook/mock', async (req, res) => {
       await sendAccessEmail({ to: body.data.email, email: body.data.email, order_id: body.data.membership_id, username: 'Tester' });
     }
     res.json({ ok: true, inserted: body });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// 4) Diagnóstico de claim (ver si hay coincidencias para email/order_id)
+app.get('/debug/claim-check', async (req, res) => {
+  try {
+    const email = String(req.query.email || '').toLowerCase().trim();
+    const order_id = String(req.query.order_id || '').trim();
+    if (!email || !order_id) return res.status(400).json({ error: 'email y order_id requeridos' });
+
+    const since = new Date(Date.now() - 24*60*60*1000).toISOString();
+    const { data } = await supabase
+      .from('webhook_logs')
+      .select('event_type, data, received_at')
+      .gte('received_at', since)
+      .order('received_at', { ascending:false })
+      .limit(200);
+
+    const matches = (data||[]).filter(r=>{
+      try{
+        const d  = r.data?.data || r.data || {};
+        const em = String((d.user && d.user.email) || d.email || '').toLowerCase();
+        const id = String(d.id || d.membership_id || d.order_id || '');
+        return em === email && id === order_id;
+      }catch{return false;}
+    });
+
+    res.json({ email, order_id, matchesCount: matches.length, matches });
   } catch (e) {
     res.status(500).json({ error: e?.message || String(e) });
   }
