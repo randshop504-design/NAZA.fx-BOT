@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
-// fetch (Node 18+ ya trae global; polyfill por si acaso)
+// fetch (Node 18+ trae global; este polyfill sirve por si acaso)
 const fetch = globalThis.fetch || ((...a) => import('node-fetch').then(({ default: f }) => f(...a)));
 
 const app = express();
@@ -330,32 +330,50 @@ app.post('/api/claim/issue', async (req,res)=>{
   }
 });
 
-/* ========= Webhook Whop (firma v1 + logging + email backup) ========= */
+/* ========= Firma Whop — acepta todos los headers comunes ========= */
+function getWhopSignature(req) {
+  // normalizamos nombres de headers a minúsculas
+  const h = Object.keys(req.headers).reduce((acc,k)=>{acc[k.toLowerCase()] = req.headers[k]; return acc;}, {});
+  return h['whop-signature']
+      || h['x-whop-signature']
+      || h['whop-webhook-signature']
+      || h['whopsignature']
+      || h['x-whopsignature']
+      || h['whop_signature']
+      || h['x-whop_signature']
+      || h['signature']
+      || null;
+}
+
 function verifyWhopV1(req) {
-  const sigHeader = req.get('Whop-Signature') || req.get('X-Whop-Signature');
   if (!WHOP_SIGNING_SECRET) return true; // para debug local
-  if (!sigHeader) return false;
-  // formato: "t=...,v1=abcdef..." (a veces vienen pares sueltos, por eso el split tolerante)
-  const pairs = Object.fromEntries(
-    sigHeader.split(',').map(s => {
+  const sigHeader = getWhopSignature(req);
+  if (!sigHeader) { console.log('⛔ invalid_signature header: undefined'); return false; }
+
+  // Whop suele mandar "t=...,v1=HMAC" — hacemos parser tolerante
+  const parts = Object.fromEntries(
+    String(sigHeader).split(',').map(s=>{
       const [k, ...rest] = s.trim().split('=');
-      return [k, (rest.join('=') || '').trim()];
+      return [k.trim(), (rest.join('=') || '').trim()];
     })
   );
-  const v1 = pairs.v1 || '';
+  const v1 = parts.v1 || String(sigHeader).trim(); // fallback si solo viene el hash
+
   const expected = crypto.createHmac('sha256', WHOP_SIGNING_SECRET).update(req.rawBody).digest('hex');
   try {
-    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(v1, 'utf8'));
+    const ok = crypto.timingSafeEqual(Buffer.from(expected,'utf8'), Buffer.from(v1,'utf8'));
+    if (!ok) console.log('⛔ invalid_signature mismatch');
+    return ok;
   } catch { return false; }
 }
 
+/* ========= Webhook Whop (valida HMAC + log + email backup) ========= */
 const okEvents = new Set(['payment_succeeded','membership_activated','membership_went_valid']);
 const cancelEvents = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
 
 app.post('/webhook/whop', async (req, res) => {
   try {
     if (!verifyWhopV1(req)) {
-      console.log('⛔ invalid_signature header:', req.get('Whop-Signature') || req.get('X-Whop-Signature'));
       return res.status(401).json({ error: 'invalid_signature' });
     }
 
@@ -412,7 +430,7 @@ app.post('/email/resend', async (req, res) => {
   }
 });
 
-/* ========= DEBUG ROUTES (quítalas cuando lances) ========= */
+/* ========= DEBUG ROUTES (quítalas al lanzar) ========= */
 
 // 1) Verificar SMTP (Gmail)
 app.get('/smtp-verify', async (_req, res) => {
