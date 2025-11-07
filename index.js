@@ -1,4 +1,4 @@
-// NAZA.fx BOT — INDEX FINAL
+// NAZA.fx BOT — INDEX FINAL (Node 18+)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail
 // Flujo: pago → /webhook/whop (valida + log + email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 → entra + rol
 require('dotenv').config();
@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
-// Node 18+ trae fetch global; polyfill si hiciera falta
+// fetch (Node 18+ lo trae; polyfill por si acaso)
 const fetch = globalThis.fetch || ((...a)=>import('node-fetch').then(({default:f})=>f(...a)));
 const app = express();
 
@@ -23,6 +23,10 @@ const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URL  = process.env.DISCORD_REDIRECT_URL || `${BASE_URL}/discord/callback`;
 const GUILD_ID = process.env.GUILD_ID || process.env.DISCORD_GUILD_ID;
 const ROLE_ID  = process.env.ROLE_ID  || process.env.DISCORD_ROLE_ID_PRO;
+
+// NUEVO: opciones de redirección directa al server
+const DISCORD_INVITE_URL = process.env.DISCORD_INVITE_URL; // p.ej. https://discord.gg/xxxx
+const DISCORD_WELCOME_CHANNEL_ID = process.env.DISCORD_WELCOME_CHANNEL_ID; // p.ej. 1234567890
 
 const WHOP_SIGNING_SECRET = process.env.WHOP_SIGNING_SECRET || process.env.WHOP_WEBHOOK_SECRET; // usa UNO (ws_…)
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-please-long-random';
@@ -56,9 +60,14 @@ const mailer = (GMAIL_USER && GMAIL_PASS)
   : null;
 
 async function sendEmail(to, { subject, html }) {
-  if (!mailer) { console.log('📧 [FAKE EMAIL]', to, subject); return; }
-  const info = await mailer.sendMail({ from: FROM_EMAIL || GMAIL_USER, to, subject, html });
-  console.log('📧 Enviado:', info.messageId, '→', to);
+  if (!mailer) { console.log('📧 [FAKE EMAIL] (mailer inactivo)', { to, subject }); return; }
+  try {
+    const info = await mailer.sendMail({ from: FROM_EMAIL || GMAIL_USER, to, subject, html });
+    console.log('📧 Enviado OK →', to, ' id:', info.messageId);
+  } catch (e) {
+    console.error('📧 ERROR al enviar a', to, ':', e?.message || e);
+    throw e;
+  }
 }
 
 function buildWelcomeEmailHTML({ email, order_id, username='NAZA Tester' }) {
@@ -138,7 +147,7 @@ async function logWebhook(event_id, event_type, data) {
   catch (e) { console.log('webhook_logs insert error:', e?.message || e); }
 }
 
-/* ========= Parsers: RAW solo para /webhook/whop ========= */
+/* ========= Parsers: RAW sólo para /webhook/whop ========= */
 function rawBodySaver(req, _res, buf) { if (buf?.length) req.rawBody = buf; }
 app.use((req, res, next) => {
   if (req.path === '/webhook/whop') express.raw({ type:'application/json', verify: rawBodySaver })(req, res, next);
@@ -222,7 +231,7 @@ app.get('/redirect', (req, res) => {
   </script>`);
 });
 
-/* ========= Seguridad: requireClaim para OAuth ========= */
+/* ========= Seguridad: requireClaim ========= */
 function requireClaim(req,res,next){
   const { claim } = req.query || {};
   if(!claim) return res.status(401).send('🔒 Enlace inválido. Abre el botón desde tu correo.');
@@ -270,17 +279,35 @@ app.get('/discord/callback', async (req,res)=>{
     if (existing?.discord_id && existing.discord_id !== me.id)
       return res.status(403).send('⛔ Esta membresía ya está vinculada a otra cuenta.');
 
-    // Join + role
-    await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}`,{
+    // Join + role (con chequeo y logs)
+    let joinOk = true;
+    const joinRes = await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}`,{
       method:'PUT', headers:{ Authorization:'Bot '+DISCORD_BOT_TOKEN, 'Content-Type':'application/json' },
       body: JSON.stringify({ access_token })
-    }).catch(()=>{});
-    await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}/roles/${ROLE_ID}`,{
+    }).catch(()=>({ ok:false, status:0 }));
+    if (!joinRes?.ok) { joinOk = false; console.warn('⚠️ Falló join del usuario al guild. status=', joinRes?.status); }
+
+    const roleRes = await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}/roles/${ROLE_ID}`,{
       method:'PUT', headers:{ Authorization:'Bot '+DISCORD_BOT_TOKEN }
-    });
+    }).catch(()=>({ ok:false, status:0 }));
+    if (!roleRes?.ok) console.warn('⚠️ Falló asignación de rol. status=', roleRes?.status);
 
     if (!existing?.discord_id) await linkSet(st.membership_id, me.id);
-    res.redirect(SUCCESS_URL);
+
+    // Decide redirección final
+    let finalUrl = SUCCESS_URL;
+    if (DISCORD_INVITE_URL) {
+      finalUrl = DISCORD_INVITE_URL; // abre app/web del servidor
+    } else if (DISCORD_WELCOME_CHANNEL_ID) {
+      finalUrl = `https://discord.com/channels/${GUILD_ID}/${DISCORD_WELCOME_CHANNEL_ID}`;
+    } else {
+      finalUrl = 'https://discord.com/app';
+    }
+
+    // Si el join falló, igual lo mandamos a invite para que entre manualmente
+    if (!joinOk && DISCORD_INVITE_URL) finalUrl = DISCORD_INVITE_URL;
+
+    res.redirect(finalUrl);
   }catch(e){
     console.error('DISCORD_CALLBACK_ERROR', e?.message || e);
     res.status(500).send('OAuth error');
@@ -372,12 +399,16 @@ app.post('/webhook/whop', async (req,res)=>{
     const memberId = body?.data?.id || body?.data?.membership_id || null;
 
     if (OK_EVENTS.has(action) && email) {
-      await sendAccessEmail({
-        to:email, email,
-        order_id: memberId || '',
-        username: body?.data?.user?.username || body?.data?.user?.name || 'NAZA Tester'
-      });
-      console.log('📧 Post-pago enviado a', email);
+      try {
+        await sendAccessEmail({
+          to:email, email,
+          order_id: memberId || '',
+          username: body?.data?.user?.username || body?.data?.user?.name || 'NAZA Tester'
+        });
+        console.log('📧 Post-pago enviado a', email);
+      } catch (e) {
+        console.error('📧 ERROR post-pago →', email, e?.message || e);
+      }
       return res.json({ status:'claim_email_sent' });
     }
 
@@ -411,7 +442,17 @@ app.post('/email/resend', async (req,res)=>{
   }catch(e){ res.status(500).json({ error:'server_error' }); }
 });
 
-/* ========= DEBUG (quitar al lanzar) ========= */
+// Test rápido de email: /mail/test?to=correo&id=ABC
+app.get('/mail/test', async (req,res)=>{
+  try{
+    const to = String(req.query.to||'').trim();
+    if(!to) return res.status(400).send('Falta ?to=');
+    await sendAccessEmail({ to, email:to, order_id: String(req.query.id||'TEST'), username:'Tester' });
+    res.send('OK (mail enviado si SMTP está bien)');
+  }catch(e){ res.status(500).send('ERROR: '+(e?.message||e)); }
+});
+
+/* ========= DEBUG ========= */
 app.get('/smtp-verify', async (_req,res)=>{
   try{
     if(!GMAIL_USER || !GMAIL_PASS) return res.status(200).send('Mailer inactivo: faltan GMAIL_USER/GMAIL_PASS');
