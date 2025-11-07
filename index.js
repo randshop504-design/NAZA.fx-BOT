@@ -1,4 +1,4 @@
-// NAZA.fx BOT — INDEX FINAL COMPLETITO (nov-2025)
+// NAZA.fx BOT — INDEX FINAL (nov-2025)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail
 // Flujo: pago → /webhook/whop (valida+log+email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 → entra+rol
 
@@ -62,10 +62,27 @@ const mailer = (GMAIL_USER && GMAIL_PASS)
     })
   : null;
 
+// *** HOTFIX: sendEmail robusto con logs ***
 async function sendEmail(to, { subject, html }) {
-  if (!mailer) { console.log('📧 [FAKE EMAIL]', to, subject); return; }
-  const info = await mailer.sendMail({ from: FROM_EMAIL || GMAIL_USER, to, subject, html });
-  console.log('📧 Enviado:', info.messageId, '→', to);
+  try {
+    if (!mailer) {
+      console.log('📧 [FAKE EMAIL - mailer inactivo] →', to, '|', subject);
+      return;
+    }
+    if (!to || !/.+@.+\..+/.test(to)) {
+      console.error('📧 EMAIL_INVALID_TO:', to);
+      return;
+    }
+    const info = await mailer.sendMail({
+      from: FROM_EMAIL || GMAIL_USER,
+      to,
+      subject,
+      html
+    });
+    console.log('📧 ENVIADO OK →', to, '| id:', info.messageId || 'n/a');
+  } catch (e) {
+    console.error('❌ SEND_EMAIL_ERROR →', to, '|', e?.message || e);
+  }
 }
 
 function buildWelcomeEmailHTML({ email, order_id, username='Trader' }) {
@@ -372,6 +389,11 @@ app.post('/webhook/whop', async (req,res)=>{
     const action = body?.action || body?.event || 'unknown';
     const event_id = body?.id || body?.event_id || crypto.randomUUID();
 
+    // *** Log visible para diagnóstico ***
+    console.log('🟣 WHOP WEBHOOK → action:', action,
+      '| email:', body?.data?.user?.email || body?.data?.email,
+      '| memberId:', body?.data?.membership_id || body?.data?.id);
+
     await logWebhook(event_id, action, body);
 
     const email    = body?.data?.user?.email || body?.data?.email || null;
@@ -406,6 +428,8 @@ app.post('/webhook/whop', async (req,res)=>{
 });
 
 /* ========= Utilidades ========= */
+
+// Reenvío manual (POST JSON: {email|to, order_id, username})
 app.post('/email/resend', async (req,res)=>{
   try{
     const to = String(req.body.to || req.body.email || '').trim().toLowerCase();
@@ -418,6 +442,8 @@ app.post('/email/resend', async (req,res)=>{
 });
 
 /* ========= DEBUG (quítalas al lanzar) ========= */
+
+// Verificar SMTP
 app.get('/smtp-verify', async (_req,res)=>{
   try{
     if(!GMAIL_USER || !GMAIL_PASS) return res.status(200).send('Mailer inactivo: faltan GMAIL_USER/GMAIL_PASS');
@@ -426,6 +452,7 @@ app.get('/smtp-verify', async (_req,res)=>{
   }catch(e){ res.status(500).send('SMTP ERROR: '+(e?.message || e)); }
 });
 
+// Ver últimos eventos
 app.get('/debug/webhook-logs', async (_req,res)=>{
   try{
     const { data, error } = await supabase.from('webhook_logs')
@@ -435,13 +462,14 @@ app.get('/debug/webhook-logs', async (_req,res)=>{
   }catch(e){ res.status(500).json({ error:String(e) }); }
 });
 
+// Ver qué headers de firma llegan
 app.get('/debug/verify-signature', (req,res)=>{
   const names = ['Whop-Signature','X-Whop-Signature','whop-signature','x-whop-signature','WHOP-SIGNATURE','X-WHOP-SIGNATURE'];
   const seen = names.map(n=>`${n}: ${req.get(n) || '-'}`).join(' | ');
   res.send('Headers → ' + seen);
 });
 
-// Enviar email de prueba SIN pagar (GET)
+// Email de prueba SIN pagar (GET)
 app.get('/mail/test', async (req,res)=>{
   try{
     const to = String(req.query.to || '').trim().toLowerCase();
@@ -450,6 +478,20 @@ app.get('/mail/test', async (req,res)=>{
     await sendAccessEmail({ to, email:to, order_id:id, username:'Tester' });
     res.send('OK, test email enviado a '+to);
   }catch(e){ res.status(500).send('MAIL_TEST_ERROR: '+(e?.message || e)); }
+});
+
+// *** NUEVO: Forzar email manual desde navegador (sin pagar) ***
+app.get('/mail/force', async (req,res)=>{
+  try{
+    const to = String(req.query.to || '').trim().toLowerCase();
+    const id = String(req.query.id || 'TEST-' + Date.now());
+    const user = String(req.query.username || 'Trader');
+    if (!to) return res.status(400).send('Falta ?to=');
+    await sendAccessEmail({ to, email: to, order_id: id, username: user });
+    res.send('FORCE OK → enviado a ' + to);
+  } catch (e) {
+    res.status(500).send('FORCE ERROR: ' + (e?.message || e));
+  }
 });
 
 // Mock de webhook (sin Whop)
