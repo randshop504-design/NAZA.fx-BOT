@@ -1,6 +1,6 @@
-// NAZA.fx BOT — INDEX FINAL (nov-2025)
+// NAZA.fx BOT — INDEX FINAL (Gmail fix + Redirect a invite)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail
-// Flujo: pago → /webhook/whop (valida+log+email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 → entra+rol
+// Flujo: pago → webhook (valida+log+email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 → entra+rol → invite/canal
 
 require('dotenv').config();
 const express = require('express');
@@ -9,7 +9,7 @@ const jwt     = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
-// Node 18+ trae fetch global; polyfill por si acaso
+// Node 18+ trae fetch; polyfill si hace falta
 const fetch = globalThis.fetch || ((...a)=>import('node-fetch').then(({default:f})=>f(...a)));
 const app = express();
 
@@ -49,39 +49,57 @@ const {
   TELEGRAM_URL = 'https://t.me/',
   LOGO_URL = '',
   FOOTER_IMAGE_URL = '',
-  // PNGs estables (no SVG) para máxima compatibilidad en Gmail
+  // PNGs estables (no SVG) para Gmail
   ICON_WHATSAPP_URL = 'https://img.icons8.com/color/48/whatsapp--v1.png',
   ICON_TELEGRAM_URL = 'https://img.icons8.com/color/48/telegram-app.png',
   ADMIN_TEST_TOKEN
 } = process.env;
 
-const mailer = (GMAIL_USER && GMAIL_PASS)
-  ? nodemailer.createTransport({
-      host:'smtp.gmail.com', port:465, secure:true,
-      auth:{ user:GMAIL_USER, pass:GMAIL_PASS }
-    })
-  : null;
+// Transport principal (465)
+function buildTransport465(){
+  return nodemailer.createTransport({
+    host:'smtp.gmail.com',
+    port:465,
+    secure:true,
+    auth:{ user:GMAIL_USER, pass:GMAIL_PASS },
+    pool:true,
+    tls:{ rejectUnauthorized:true, ciphers:'TLSv1.2' }
+  });
+}
+// Transport alterno (587 STARTTLS)
+function buildTransport587(){
+  return nodemailer.createTransport({
+    host:'smtp.gmail.com',
+    port:587,
+    secure:false,
+    auth:{ user:GMAIL_USER, pass:GMAIL_PASS },
+    requireTLS:true,
+    tls:{ minVersion:'TLSv1.2' }
+  });
+}
 
-// *** HOTFIX: sendEmail robusto con logs ***
+let mailer = (GMAIL_USER && GMAIL_PASS) ? buildTransport465() : null;
+
+// Envío con reintento (465 → 587)
 async function sendEmail(to, { subject, html }) {
+  if (!GMAIL_USER || !GMAIL_PASS) {
+    console.log('📧 [FAKE EMAIL] Falta GMAIL_USER/GMAIL_PASS →', to, subject);
+    return;
+  }
   try {
-    if (!mailer) {
-      console.log('📧 [FAKE EMAIL - mailer inactivo] →', to, '|', subject);
-      return;
-    }
-    if (!to || !/.+@.+\..+/.test(to)) {
-      console.error('📧 EMAIL_INVALID_TO:', to);
-      return;
-    }
-    const info = await mailer.sendMail({
-      from: FROM_EMAIL || GMAIL_USER,
-      to,
-      subject,
-      html
-    });
-    console.log('📧 ENVIADO OK →', to, '| id:', info.messageId || 'n/a');
+    const info = await mailer.sendMail({ from: FROM_EMAIL || GMAIL_USER, to, subject, html });
+    console.log('📧 Enviado (465):', info.messageId, '→', to);
   } catch (e) {
-    console.error('❌ SEND_EMAIL_ERROR →', to, '|', e?.message || e);
+    console.error('❌ SEND_EMAIL_ERROR (465):', e && (e.response || e.message || e));
+    try {
+      const alt = buildTransport587();
+      const info2 = await alt.sendMail({ from: FROM_EMAIL || GMAIL_USER, to, subject, html });
+      console.log('📧 Enviado (587):', info2.messageId, '→', to);
+      mailer = alt; // si 587 funcionó, dejamos este
+    } catch (e2) {
+      console.error('❌ SEND_EMAIL_ERROR (587):', e2 && (e2.response || e2.message || e2));
+      throw e2;
+    }
   }
 }
 
@@ -94,7 +112,7 @@ function buildWelcomeEmailHTML({ email, order_id, username='Trader' }) {
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#0b0d10">
       <tr><td align="center">
         <table role="presentation" width="640" style="max-width:640px;background:#0f1217;color:#e6e9ef;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;border:1px solid #1b212a;border-radius:12px;overflow:hidden;">
-          ${LOGO_URL ? `<tr><td align="center" style="padding:22px"><img src="${LOGO_URL}" alt="logo" style="height:64px;border-radius:12px;border:1px solid #2a3240"></td></tr>` : ''}
+          ${LOGO_URL ? `<tr><td align="center" style="padding:22px"><img src="${LOGO_URL}" alt="logo" style="height:64px;border-radius:12px;border:1px solid #2a3240;display:block"></td></tr>` : ''}
           <tr><td align="center" style="padding:8px 24px 0">
             <h2 style="margin:0;font-size:22px;color:#fff">${APP_NAME}</h2>
             <p style="margin:6px 0 0;font-size:12px;color:#98a1b3">Si no ves este correo, revisa <b>Spam/Promociones</b>.</p>
@@ -119,10 +137,10 @@ function buildWelcomeEmailHTML({ email, order_id, username='Trader' }) {
             <p style="${p}">Comunidades privadas</p>
             <div style="margin:10px 0 22px">
               <a href="${WHATSAPP_URL}" style="${btn}background:#1f6f3f;color:#fff">
-                <img src="${ICON_WHATSAPP_URL}" alt="WhatsApp" style="height:18px;width:18px;vertical-align:middle;margin-right:8px;border:0">WhatsApp
+                <img src="${ICON_WHATSAPP_URL}" alt="WhatsApp" width="18" height="18" style="vertical-align:middle;margin-right:8px;border:0;display:inline-block">WhatsApp
               </a>
               <a href="${TELEGRAM_URL}" style="${btn}background:#433e96;color:#fff;margin-left:8px">
-                <img src="${ICON_TELEGRAM_URL}" alt="Telegram" style="height:18px;width:18px;vertical-align:middle;margin-right:8px;border:0">Telegram
+                <img src="${ICON_TELEGRAM_URL}" alt="Telegram" width="18" height="18" style="vertical-align:middle;margin-right:8px;border:0;display:inline-block">Telegram
               </a>
             </div>
 
@@ -305,7 +323,7 @@ app.get('/discord/callback', async (req,res)=>{
 
     if (!existing?.discord_id) await linkSet(st.membership_id, me.id);
 
-    // Redirección final configurable
+    // Redirección final (usa tu invite si lo pusiste)
     res.redirect(FINAL_REDIRECT);
   }catch(e){
     console.error('DISCORD_CALLBACK_ERROR', e?.message || e);
@@ -364,8 +382,8 @@ function getWhopSignatureHeader(req){
 function verifyWhopSignature(req){
   const sigHeader = getWhopSignatureHeader(req);
   if (!WHOP_SIGNING_SECRET) return { ok:true, reason:'sin_secret' };
-  if (!sigHeader)          return { ok:TEST_MODE, reason:'header_missing' }; // permite en TEST_MODE
-  // Formato frecuente: "t=...,v1=abcdef..." — pero tolera "abcdef" a secas.
+  if (!sigHeader)          return { ok:TEST_MODE, reason:'header_missing' };
+  // "t=...,v1=abcdef..." o "abcdef"
   const parts = Object.fromEntries(sigHeader.split(',').map(s=>s.trim().split('=')));
   const v1 = parts.v1 || sigHeader.trim();
   const expected = crypto.createHmac('sha256', WHOP_SIGNING_SECRET).update(req.rawBody).digest('hex');
@@ -389,24 +407,23 @@ app.post('/webhook/whop', async (req,res)=>{
     const action = body?.action || body?.event || 'unknown';
     const event_id = body?.id || body?.event_id || crypto.randomUUID();
 
-    // *** Log visible para diagnóstico ***
-    console.log('🟣 WHOP WEBHOOK → action:', action,
-      '| email:', body?.data?.user?.email || body?.data?.email,
-      '| memberId:', body?.data?.membership_id || body?.data?.id);
-
     await logWebhook(event_id, action, body);
 
     const email    = body?.data?.user?.email || body?.data?.email || null;
     const memberId = body?.data?.id || body?.data?.membership_id || null;
 
     if (OK_EVENTS.has(action) && email) {
-      await sendAccessEmail({
-        to:email, email,
-        order_id: memberId || '',
-        username: body?.data?.user?.username || body?.data?.user?.name || 'Trader'
-      });
-      console.log('📧 Post-pago enviado a', email);
-      return res.json({ status:'claim_email_sent' });
+      try {
+        await sendAccessEmail({
+          to:email, email,
+          order_id: memberId || '',
+          username: body?.data?.user?.username || body?.data?.user?.name || 'Trader'
+        });
+        console.log('📧 Post-pago enviado a', email);
+      } catch (e) {
+        console.error('❌ ERROR al enviar post-pago:', e?.response || e?.message || e);
+      }
+      return res.json({ status:'processed' });
     }
 
     if (CANCEL_EVENTS.has(action) && memberId) {
@@ -428,8 +445,6 @@ app.post('/webhook/whop', async (req,res)=>{
 });
 
 /* ========= Utilidades ========= */
-
-// Reenvío manual (POST JSON: {email|to, order_id, username})
 app.post('/email/resend', async (req,res)=>{
   try{
     const to = String(req.body.to || req.body.email || '').trim().toLowerCase();
@@ -442,17 +457,23 @@ app.post('/email/resend', async (req,res)=>{
 });
 
 /* ========= DEBUG (quítalas al lanzar) ========= */
-
-// Verificar SMTP
 app.get('/smtp-verify', async (_req,res)=>{
   try{
     if(!GMAIL_USER || !GMAIL_PASS) return res.status(200).send('Mailer inactivo: faltan GMAIL_USER/GMAIL_PASS');
-    const transport = nodemailer.createTransport({ host:'smtp.gmail.com', port:465, secure:true, auth:{user:GMAIL_USER, pass:GMAIL_PASS} });
-    await transport.verify(); res.send('SMTP OK ✅');
-  }catch(e){ res.status(500).send('SMTP ERROR: '+(e?.message || e)); }
+    await mailer.verify();
+    res.send('SMTP OK ✅ (465)');
+  }catch(e){
+    try{
+      const alt = buildTransport587();
+      await alt.verify();
+      res.send('SMTP OK ✅ (587)');
+      mailer = alt;
+    }catch(e2){
+      res.status(500).send('SMTP ERROR: '+(e2?.response || e2?.message || e2));
+    }
+  }
 });
 
-// Ver últimos eventos
 app.get('/debug/webhook-logs', async (_req,res)=>{
   try{
     const { data, error } = await supabase.from('webhook_logs')
@@ -462,14 +483,13 @@ app.get('/debug/webhook-logs', async (_req,res)=>{
   }catch(e){ res.status(500).json({ error:String(e) }); }
 });
 
-// Ver qué headers de firma llegan
 app.get('/debug/verify-signature', (req,res)=>{
   const names = ['Whop-Signature','X-Whop-Signature','whop-signature','x-whop-signature','WHOP-SIGNATURE','X-WHOP-SIGNATURE'];
   const seen = names.map(n=>`${n}: ${req.get(n) || '-'}`).join(' | ');
   res.send('Headers → ' + seen);
 });
 
-// Email de prueba SIN pagar (GET)
+// Enviar email de prueba SIN pagar (GET)
 app.get('/mail/test', async (req,res)=>{
   try{
     const to = String(req.query.to || '').trim().toLowerCase();
@@ -477,24 +497,21 @@ app.get('/mail/test', async (req,res)=>{
     if (!to) return res.status(400).send('Falta ?to=');
     await sendAccessEmail({ to, email:to, order_id:id, username:'Tester' });
     res.send('OK, test email enviado a '+to);
-  }catch(e){ res.status(500).send('MAIL_TEST_ERROR: '+(e?.message || e)); }
+  }catch(e){ res.status(500).send('MAIL_TEST_ERROR: '+(e?.response || e?.message || e)); }
 });
 
-// *** NUEVO: Forzar email manual desde navegador (sin pagar) ***
+// Forzar email con datos en query (sin supabase) — útil si el webhook aún no llega
 app.get('/mail/force', async (req,res)=>{
   try{
     const to = String(req.query.to || '').trim().toLowerCase();
-    const id = String(req.query.id || 'TEST-' + Date.now());
-    const user = String(req.query.username || 'Trader');
+    const id = String(req.query.id || 'TEST-FORCE');
     if (!to) return res.status(400).send('Falta ?to=');
-    await sendAccessEmail({ to, email: to, order_id: id, username: user });
-    res.send('FORCE OK → enviado a ' + to);
-  } catch (e) {
-    res.status(500).send('FORCE ERROR: ' + (e?.message || e));
-  }
+    await sendAccessEmail({ to, email:to, order_id:id, username:'Trader' });
+    res.send('OK, force email enviado a '+to);
+  }catch(e){ res.status(500).send('MAIL_FORCE_ERROR: '+(e?.response || e?.message || e)); }
 });
 
-// Mock de webhook (sin Whop)
+// Mock de webhook (sin Whop, para test)
 app.get('/webhook/mock', async (req,res)=>{
   try{
     if (!ADMIN_TEST_TOKEN || req.query.token !== ADMIN_TEST_TOKEN) return res.status(401).send('UNAUTHORIZED');
