@@ -1,21 +1,22 @@
-// NAZA.fx BOT — INDEX FINAL (Node 18+)
+// NAZA.fx BOT — INDEX FINAL COMPLETITO (nov-2025)
 // Whop ↔ Render ↔ Discord + Supabase + Gmail
-// Flujo: pago → /webhook/whop (valida + log + email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 → entra + rol
+// Flujo: pago → /webhook/whop (valida+log+email) → /redirect (TyC) → claim 1-uso/24h → OAuth2 → entra+rol
+
 require('dotenv').config();
 const express = require('express');
-const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
+const crypto  = require('crypto');
+const jwt     = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
-// fetch (Node 18+ lo trae; polyfill por si acaso)
+// Node 18+ trae fetch global; polyfill por si acaso
 const fetch = globalThis.fetch || ((...a)=>import('node-fetch').then(({default:f})=>f(...a)));
 const app = express();
 
 /* ========= ENV ========= */
-const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.APP_BASE_URL || `http://localhost:${PORT}`;
-const APP_NAME = process.env.APP_NAME || 'NAZA Trading Academy';
+const PORT      = process.env.PORT || 3000;
+const BASE_URL  = process.env.RENDER_EXTERNAL_URL || process.env.APP_BASE_URL || `http://localhost:${PORT}`;
+const APP_NAME  = process.env.APP_NAME || 'NAZA Trading Academy';
 
 const DISCORD_BOT_TOKEN     = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
@@ -24,19 +25,20 @@ const DISCORD_REDIRECT_URL  = process.env.DISCORD_REDIRECT_URL || `${BASE_URL}/d
 const GUILD_ID = process.env.GUILD_ID || process.env.DISCORD_GUILD_ID;
 const ROLE_ID  = process.env.ROLE_ID  || process.env.DISCORD_ROLE_ID_PRO;
 
-// NUEVO: opciones de redirección directa al server
-const DISCORD_INVITE_URL = process.env.DISCORD_INVITE_URL; // p.ej. https://discord.gg/xxxx
-const DISCORD_WELCOME_CHANNEL_ID = process.env.DISCORD_WELCOME_CHANNEL_ID; // p.ej. 1234567890
+// Redirección final tras OAuth (elige en este orden)
+const FINAL_REDIRECT =
+  process.env.DISCORD_INVITE_URL
+  || (process.env.DISCORD_WELCOME_CHANNEL_ID ? `https://discord.com/channels/${GUILD_ID}/${process.env.DISCORD_WELCOME_CHANNEL_ID}` : null)
+  || process.env.SUCCESS_URL
+  || `${BASE_URL}/redirect`;
 
 const WHOP_SIGNING_SECRET = process.env.WHOP_SIGNING_SECRET || process.env.WHOP_WEBHOOK_SECRET; // usa UNO (ws_…)
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-please-long-random';
-const TEST_MODE = String(process.env.TEST_MODE || 'false').toLowerCase() === 'true';
+const TEST_MODE  = String(process.env.TEST_MODE || 'false').toLowerCase()==='true';
 
-const SUCCESS_URL = process.env.SUCCESS_URL || `${BASE_URL}/redirect`;
-
-const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_URL          = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession:false } });
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth:{ persistSession:false } });
 
 /* ========= Email (Gmail) ========= */
 const {
@@ -47,8 +49,9 @@ const {
   TELEGRAM_URL = 'https://t.me/',
   LOGO_URL = '',
   FOOTER_IMAGE_URL = '',
-  ICON_WHATSAPP_URL = 'https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg',
-  ICON_TELEGRAM_URL = 'https://upload.wikimedia.org/wikipedia/commons/8/82/Telegram_logo.svg',
+  // PNGs estables (no SVG) para máxima compatibilidad en Gmail
+  ICON_WHATSAPP_URL = 'https://img.icons8.com/color/48/whatsapp--v1.png',
+  ICON_TELEGRAM_URL = 'https://img.icons8.com/color/48/telegram-app.png',
   ADMIN_TEST_TOKEN
 } = process.env;
 
@@ -60,19 +63,14 @@ const mailer = (GMAIL_USER && GMAIL_PASS)
   : null;
 
 async function sendEmail(to, { subject, html }) {
-  if (!mailer) { console.log('📧 [FAKE EMAIL] (mailer inactivo)', { to, subject }); return; }
-  try {
-    const info = await mailer.sendMail({ from: FROM_EMAIL || GMAIL_USER, to, subject, html });
-    console.log('📧 Enviado OK →', to, ' id:', info.messageId);
-  } catch (e) {
-    console.error('📧 ERROR al enviar a', to, ':', e?.message || e);
-    throw e;
-  }
+  if (!mailer) { console.log('📧 [FAKE EMAIL]', to, subject); return; }
+  const info = await mailer.sendMail({ from: FROM_EMAIL || GMAIL_USER, to, subject, html });
+  console.log('📧 Enviado:', info.messageId, '→', to);
 }
 
-function buildWelcomeEmailHTML({ email, order_id, username='NAZA Tester' }) {
+function buildWelcomeEmailHTML({ email, order_id, username='Trader' }) {
   const btn = 'display:inline-block;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;';
-  const p = 'margin:0 0 14px;line-height:1.6;';
+  const p   = 'margin:0 0 14px;line-height:1.6;';
   const redirectLink = `${BASE_URL}/redirect?email=${encodeURIComponent(email||'')}&order_id=${encodeURIComponent(order_id||'')}`;
   return `
   <div style="margin:0;padding:0;background:#0b0d10;">
@@ -104,10 +102,10 @@ function buildWelcomeEmailHTML({ email, order_id, username='NAZA Tester' }) {
             <p style="${p}">Comunidades privadas</p>
             <div style="margin:10px 0 22px">
               <a href="${WHATSAPP_URL}" style="${btn}background:#1f6f3f;color:#fff">
-                <img src="${ICON_WHATSAPP_URL}" alt="WhatsApp" style="height:18px;vertical-align:middle;margin-right:8px">WhatsApp
+                <img src="${ICON_WHATSAPP_URL}" alt="WhatsApp" style="height:18px;width:18px;vertical-align:middle;margin-right:8px;border:0">WhatsApp
               </a>
               <a href="${TELEGRAM_URL}" style="${btn}background:#433e96;color:#fff;margin-left:8px">
-                <img src="${ICON_TELEGRAM_URL}" alt="Telegram" style="height:18px;vertical-align:middle;margin-right:8px">Telegram
+                <img src="${ICON_TELEGRAM_URL}" alt="Telegram" style="height:18px;width:18px;vertical-align:middle;margin-right:8px;border:0">Telegram
               </a>
             </div>
 
@@ -147,18 +145,18 @@ async function logWebhook(event_id, event_type, data) {
   catch (e) { console.log('webhook_logs insert error:', e?.message || e); }
 }
 
-/* ========= Parsers: RAW sólo para /webhook/whop ========= */
-function rawBodySaver(req, _res, buf) { if (buf?.length) req.rawBody = buf; }
-app.use((req, res, next) => {
-  if (req.path === '/webhook/whop') express.raw({ type:'application/json', verify: rawBodySaver })(req, res, next);
-  else express.json()(req, res, next);
+/* ========= Parsers: RAW solo /webhook/whop ========= */
+function rawBodySaver(req,_res,buf){ if (buf?.length) req.rawBody = buf; }
+app.use((req,res,next)=>{
+  if (req.path === '/webhook/whop') express.raw({ type:'application/json', verify: rawBodySaver })(req,res,next);
+  else express.json()(req,res,next);
 });
 
 /* ========= Health ========= */
-app.get('/health', (_req, res) => res.json({ ok:true, ts:new Date().toISOString() }));
+app.get('/health', (_req,res)=>res.json({ ok:true, ts:new Date().toISOString() }));
 
 /* ========= Página post-pago (negra + TyC + switch) ========= */
-app.get('/redirect', (req, res) => {
+app.get('/redirect', (req,res)=>{
   const { claim = '', email = '', order_id = '' } = req.query || {};
   res.set('Content-Type','text/html').send(`
   <!doctype html><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -231,7 +229,7 @@ app.get('/redirect', (req, res) => {
   </script>`);
 });
 
-/* ========= Seguridad: requireClaim ========= */
+/* ========= Seguridad: requireClaim para OAuth ========= */
 function requireClaim(req,res,next){
   const { claim } = req.query || {};
   if(!claim) return res.status(401).send('🔒 Enlace inválido. Abre el botón desde tu correo.');
@@ -279,42 +277,26 @@ app.get('/discord/callback', async (req,res)=>{
     if (existing?.discord_id && existing.discord_id !== me.id)
       return res.status(403).send('⛔ Esta membresía ya está vinculada a otra cuenta.');
 
-    // Join + role (con chequeo y logs)
-    let joinOk = true;
-    const joinRes = await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}`,{
+    // Join + role
+    await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}`,{
       method:'PUT', headers:{ Authorization:'Bot '+DISCORD_BOT_TOKEN, 'Content-Type':'application/json' },
       body: JSON.stringify({ access_token })
-    }).catch(()=>({ ok:false, status:0 }));
-    if (!joinRes?.ok) { joinOk = false; console.warn('⚠️ Falló join del usuario al guild. status=', joinRes?.status); }
-
-    const roleRes = await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}/roles/${ROLE_ID}`,{
+    }).catch(()=>{});
+    await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${me.id}/roles/${ROLE_ID}`,{
       method:'PUT', headers:{ Authorization:'Bot '+DISCORD_BOT_TOKEN }
-    }).catch(()=>({ ok:false, status:0 }));
-    if (!roleRes?.ok) console.warn('⚠️ Falló asignación de rol. status=', roleRes?.status);
+    });
 
     if (!existing?.discord_id) await linkSet(st.membership_id, me.id);
 
-    // Decide redirección final
-    let finalUrl = SUCCESS_URL;
-    if (DISCORD_INVITE_URL) {
-      finalUrl = DISCORD_INVITE_URL; // abre app/web del servidor
-    } else if (DISCORD_WELCOME_CHANNEL_ID) {
-      finalUrl = `https://discord.com/channels/${GUILD_ID}/${DISCORD_WELCOME_CHANNEL_ID}`;
-    } else {
-      finalUrl = 'https://discord.com/app';
-    }
-
-    // Si el join falló, igual lo mandamos a invite para que entre manualmente
-    if (!joinOk && DISCORD_INVITE_URL) finalUrl = DISCORD_INVITE_URL;
-
-    res.redirect(finalUrl);
+    // Redirección final configurable
+    res.redirect(FINAL_REDIRECT);
   }catch(e){
     console.error('DISCORD_CALLBACK_ERROR', e?.message || e);
     res.status(500).send('OAuth error');
   }
 });
 
-/* ========= Emisión del claim tras TyC ========= */
+/* ========= Emisión de claim tras TyC ========= */
 app.post('/api/claim/issue', async (req,res)=>{
   try{
     const { order_id, email } = req.body || {};
@@ -328,13 +310,13 @@ app.post('/api/claim/issue', async (req,res)=>{
       .select('event_type, data, received_at')
       .gte('received_at', since)
       .order('received_at',{ ascending:false })
-      .limit(120);
+      .limit(200);
 
     if (error) return res.status(500).json({ error:'db_error' });
 
     const found = (data||[]).find(r=>{
       try{
-        const d = r.data?.data || r.data;
+        const d  = r.data?.data || r.data;
         const em = (d?.user?.email || d?.email || '').toLowerCase();
         const id = d?.id || d?.membership_id || d?.order_id || '';
         return okEvents.includes(r.event_type) &&
@@ -358,57 +340,50 @@ app.post('/api/claim/issue', async (req,res)=>{
 
 /* ========= Webhook Whop (firma flexible + logging + email) ========= */
 function getWhopSignatureHeader(req){
-  const names = [
-    'Whop-Signature','X-Whop-Signature','whop-signature','x-whop-signature',
-    'WHOP-SIGNATURE','X-WHOP-SIGNATURE'
-  ];
+  const names = ['Whop-Signature','X-Whop-Signature','whop-signature','x-whop-signature','WHOP-SIGNATURE','X-WHOP-SIGNATURE'];
   for (const n of names){ const v = req.get(n); if (v) return v; }
   return null;
 }
 function verifyWhopSignature(req){
   const sigHeader = getWhopSignatureHeader(req);
   if (!WHOP_SIGNING_SECRET) return { ok:true, reason:'sin_secret' };
-  if (!sigHeader) return { ok:TEST_MODE, reason:'header_missing' }; // permite en pruebas
-  // formato: "t=...,v1=abcdef..."
+  if (!sigHeader)          return { ok:TEST_MODE, reason:'header_missing' }; // permite en TEST_MODE
+  // Formato frecuente: "t=...,v1=abcdef..." — pero tolera "abcdef" a secas.
   const parts = Object.fromEntries(sigHeader.split(',').map(s=>s.trim().split('=')));
-  const v1 = parts.v1 || sigHeader.trim(); // si viene solo el hash
+  const v1 = parts.v1 || sigHeader.trim();
   const expected = crypto.createHmac('sha256', WHOP_SIGNING_SECRET).update(req.rawBody).digest('hex');
   let ok = false;
   try{ ok = crypto.timingSafeEqual(Buffer.from(expected,'utf8'), Buffer.from(v1,'utf8')); }catch{ ok = false; }
   return { ok: ok || TEST_MODE, reason: ok ? 'valid' : (TEST_MODE ? 'test_mode' : 'mismatch') };
 }
 
-const OK_EVENTS = new Set(['payment_succeeded','membership_activated','membership_went_valid']);
+const OK_EVENTS     = new Set(['payment_succeeded','membership_activated','membership_went_valid']);
 const CANCEL_EVENTS = new Set(['membership_cancelled','membership_cancelled_by_user','membership_expired','membership_deactivated']);
 
 app.post('/webhook/whop', async (req,res)=>{
   try{
     const sig = verifyWhopSignature(req);
     if (!sig.ok) {
-      console.log('⚠️ Header de firma no encontrado o inválido.');
+      console.log('⚠️ invalid_signature (motivo:', sig.reason, ')');
       return res.status(401).json({ error:'invalid_signature' });
     }
 
-    const body = JSON.parse(req.rawBody.toString('utf8'));
+    const body   = JSON.parse(req.rawBody.toString('utf8'));
     const action = body?.action || body?.event || 'unknown';
     const event_id = body?.id || body?.event_id || crypto.randomUUID();
 
     await logWebhook(event_id, action, body);
 
-    const email = body?.data?.user?.email || body?.data?.email || null;
+    const email    = body?.data?.user?.email || body?.data?.email || null;
     const memberId = body?.data?.id || body?.data?.membership_id || null;
 
     if (OK_EVENTS.has(action) && email) {
-      try {
-        await sendAccessEmail({
-          to:email, email,
-          order_id: memberId || '',
-          username: body?.data?.user?.username || body?.data?.user?.name || 'NAZA Tester'
-        });
-        console.log('📧 Post-pago enviado a', email);
-      } catch (e) {
-        console.error('📧 ERROR post-pago →', email, e?.message || e);
-      }
+      await sendAccessEmail({
+        to:email, email,
+        order_id: memberId || '',
+        username: body?.data?.user?.username || body?.data?.user?.name || 'Trader'
+      });
+      console.log('📧 Post-pago enviado a', email);
       return res.json({ status:'claim_email_sent' });
     }
 
@@ -435,24 +410,14 @@ app.post('/email/resend', async (req,res)=>{
   try{
     const to = String(req.body.to || req.body.email || '').trim().toLowerCase();
     const order_id = String(req.body.order_id || '').trim();
-    const username = String(req.body.username || 'NAZA Tester');
+    const username = String(req.body.username || 'Trader');
     if (!to) return res.status(400).json({ error:'email requerido' });
     await sendAccessEmail({ to, email:to, order_id, username });
     res.json({ ok:true });
   }catch(e){ res.status(500).json({ error:'server_error' }); }
 });
 
-// Test rápido de email: /mail/test?to=correo&id=ABC
-app.get('/mail/test', async (req,res)=>{
-  try{
-    const to = String(req.query.to||'').trim();
-    if(!to) return res.status(400).send('Falta ?to=');
-    await sendAccessEmail({ to, email:to, order_id: String(req.query.id||'TEST'), username:'Tester' });
-    res.send('OK (mail enviado si SMTP está bien)');
-  }catch(e){ res.status(500).send('ERROR: '+(e?.message||e)); }
-});
-
-/* ========= DEBUG ========= */
+/* ========= DEBUG (quítalas al lanzar) ========= */
 app.get('/smtp-verify', async (_req,res)=>{
   try{
     if(!GMAIL_USER || !GMAIL_PASS) return res.status(200).send('Mailer inactivo: faltan GMAIL_USER/GMAIL_PASS');
@@ -464,15 +429,48 @@ app.get('/smtp-verify', async (_req,res)=>{
 app.get('/debug/webhook-logs', async (_req,res)=>{
   try{
     const { data, error } = await supabase.from('webhook_logs')
-      .select('event_type, received_at').order('received_at',{ascending:false}).limit(10);
+      .select('event_type, received_at').order('received_at',{ascending:false}).limit(20);
     if (error) return res.status(500).json({ error:error.message });
     res.json(data||[]);
   }catch(e){ res.status(500).json({ error:String(e) }); }
 });
 
 app.get('/debug/verify-signature', (req,res)=>{
-  const h = getWhopSignatureHeader(req);
-  res.send('Header visto: ' + (h || 'none'));
+  const names = ['Whop-Signature','X-Whop-Signature','whop-signature','x-whop-signature','WHOP-SIGNATURE','X-WHOP-SIGNATURE'];
+  const seen = names.map(n=>`${n}: ${req.get(n) || '-'}`).join(' | ');
+  res.send('Headers → ' + seen);
+});
+
+// Enviar email de prueba SIN pagar (GET)
+app.get('/mail/test', async (req,res)=>{
+  try{
+    const to = String(req.query.to || '').trim().toLowerCase();
+    const id = String(req.query.id || 'TEST-1');
+    if (!to) return res.status(400).send('Falta ?to=');
+    await sendAccessEmail({ to, email:to, order_id:id, username:'Tester' });
+    res.send('OK, test email enviado a '+to);
+  }catch(e){ res.status(500).send('MAIL_TEST_ERROR: '+(e?.message || e)); }
+});
+
+// Mock de webhook (sin Whop)
+app.get('/webhook/mock', async (req,res)=>{
+  try{
+    if (!ADMIN_TEST_TOKEN || req.query.token !== ADMIN_TEST_TOKEN) return res.status(401).send('UNAUTHORIZED');
+    const body = {
+      action: req.query.action || 'payment_succeeded',
+      data: {
+        id: req.query.membership_id || 'TEST-' + Date.now(),
+        membership_id: req.query.membership_id || 'TEST-' + Date.now(),
+        user: { id: req.query.user_id || 'U-' + Date.now(), email: req.query.email || 'test@example.com' },
+        email: req.query.email || 'test@example.com'
+      }
+    };
+    await supabase.from('webhook_logs').insert({ event_id: crypto.randomUUID(), event_type: body.action, data: body });
+    if (body.data?.email) {
+      await sendAccessEmail({ to: body.data.email, email: body.data.email, order_id: body.data.membership_id, username: 'Tester' });
+    }
+    res.json({ ok:true, inserted: body });
+  }catch(e){ res.status(500).json({ error: e?.message || String(e) }); }
 });
 
 console.log('🔧 Debug routes enabled');
