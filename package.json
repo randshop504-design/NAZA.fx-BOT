@@ -1,19 +1,24 @@
 {
   "name": "naza-fx-bot",
   "version": "1.0.0",
-  "description": "Whop ↔ Render ↔ Discord + Supabase + Email",
+  "description": "NAZA Trading Academy – Discord Access Bot (Braintree → Site → Bot → OAuth → Roles)",
   "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.x"
+  },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^1.35.7",
-    "body-parser": "^1.20.2",
-    "discord.js": "^14.15.3",
+    "@supabase/supabase-js": "^2.39.3",
+    "@sendgrid/mail": "^7.7.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2",
-    "node-fetch": "^3.3.2",
-    "nodemailer": "^6.9.13"
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
   }
 }
