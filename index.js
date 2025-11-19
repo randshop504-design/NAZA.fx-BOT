@@ -1,66 +1,106 @@
-// index.js — NAZA.fx BOT (final, Node 18, fetch nativo, SendGrid, Supabase)
-// + Braintree webhook + confirm endpoint (modificado)
+// index.js — NAZA.fx BOT (Node >=18)
+// Ready-to-use: Braintree webhook, secure frontend confirm, Discord OAuth & roles mapping to plan_mensual/plan_trimestral/plan_anual
 
 require('dotenv').config();
 const express = require('express');
-const crypto  = require('crypto');
-const jwt     = require('jsonwebtoken');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
 const sgMail = require('@sendgrid/mail');
 const braintree = require('braintree');
+const rateLimit = require('express-rate-limit');
+const cors = require('cors');
+const fetch = require('node-fetch');
 
 const app = express();
-app.use(express.json()); // JSON bodies
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 30 * 1000,
+  max: 30
+});
+app.use(limiter);
+
+// CORS allowlist
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  }
+};
+app.use(cors(corsOptions));
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.APP_BASE_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 const APP_NAME = process.env.APP_NAME || 'NAZA Trading Academy';
 
-const SHARED_SECRET = process.env.SHARED_SECRET || 'NazaFxSuperSecretKey_2024_zzQ12AA';
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-jwt-secret';
+const SHARED_SECRET = process.env.SHARED_SECRET || process.env.X_SHARED_SECRET || 'change-this-shared-secret';
+const JWT_SECRET = process.env.JWT_SECRET || 'change-this-jwt-secret';
+const FRONTEND_TOKEN = process.env.FRONTEND_TOKEN || null;
 
 // Supabase
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE || '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
 
 // SendGrid
 if (!process.env.SENDGRID_API_KEY) console.warn('⚠️ SENDGRID_API_KEY not set');
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
 const FROM_EMAIL = process.env.FROM_EMAIL || `no-reply@nazatradingacademy.com`;
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@nazatradingacademy.com';
 
-// Braintree gateway (for verifying webhooks)
-const BT_ENV = (process.env.BT_ENVIRONMENT && process.env.BT_ENVIRONMENT.toLowerCase()==='production') ? braintree.Environment.Production : braintree.Environment.Sandbox;
+// Braintree (support BRAINTREE_* and BT_* env names)
+const BT_ENV_RAW = (process.env.BRAINTREE_ENV || process.env.BT_ENVIRONMENT || 'sandbox').toLowerCase();
+const BT_ENV = (BT_ENV_RAW === 'production' || BT_ENV_RAW === 'prod') ? braintree.Environment.Production : braintree.Environment.Sandbox;
 const gateway = braintree.connect({
   environment: BT_ENV,
-  merchantId: process.env.BT_MERCHANT_ID || '',
-  publicKey: process.env.BT_PUBLIC_KEY || '',
-  privateKey: process.env.BT_PRIVATE_KEY || ''
+  merchantId: process.env.BRAINTREE_MERCHANT_ID || process.env.BT_MERCHANT_ID || '',
+  publicKey: process.env.BRAINTREE_PUBLIC_KEY || process.env.BT_PUBLIC_KEY || '',
+  privateKey: process.env.BRAINTREE_PRIVATE_KEY || process.env.BT_PRIVATE_KEY || ''
 });
 
-// Discord / roles / redirects
-const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const GUILD_ID = process.env.GUILD_ID;
+// Discord
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
+const GUILD_ID = process.env.GUILD_ID || process.env.DISCORD_GUILD_ID || '';
 const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL || `${BASE_URL}/discord/callback`;
 const DISCORD_INVITE_URL = process.env.DISCORD_INVITE_URL || null;
 const SUCCESS_URL = process.env.SUCCESS_URL || `${BASE_URL}/success`;
 
-const ROLE_ID_SENALES = process.env.ROLE_ID_SENALESDISCORD;
-const ROLE_ID_MENTORIA = process.env.ROLE_ID_MENTORIADISCORD;
-const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUALDISCORD || ROLE_ID_MENTORIA;
+// Role IDs
+const ROLE_ID_SENALES = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_SENALES || null;
+const ROLE_ID_MENTORIA = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_MENTORIA || null;
+const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUAL || ROLE_ID_MENTORIA || null;
+
+// Official plan ids (exact)
+const PLAN_IDS = {
+  MENSUAL: "plan_mensual",
+  TRIMESTRAL: "plan_trimestral",
+  ANUAL: "plan_anual"
+};
 
 // Helpers
 function escapeHtml(s){ if(!s) return ''; return String(s).replace(/[&<>"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' })[c]); }
-async function logEvent(event_id, event_type, data){ try{ await supabase.from('webhook_logs').insert({ event_id, event_type, data }); } catch(e){ console.log('logEvent error', e?.message || e); } }
-async function upsertLink(membership_id, discord_id){ if(!membership_id || !discord_id) return; try{ await supabase.from('membership_links').upsert({ membership_id, discord_id }, { onConflict: 'membership_id' }); } catch(e){ console.log('upsertLink error', e?.message || e); } }
+
+async function logEvent(event_id, event_type, data){
+  try{
+    if (supabase && SUPABASE_URL && SUPABASE_SERVICE_ROLE) await supabase.from('webhook_logs').insert({ event_id, event_type, data });
+  } catch(e){ console.log('logEvent error', e?.message || e); }
+}
+
+async function upsertLink(membership_id, discord_id){
+  if(!membership_id || !discord_id) return;
+  try{ await supabase.from('membership_links').upsert({ membership_id, discord_id }, { onConflict: 'membership_id' }); } catch(e){ console.log('upsertLink error', e?.message || e); }
+}
 async function createClaimRecord(jti, membership_id){ try{ await supabase.from('claims_issued').insert({ jti, membership_id }); } catch(e){} }
 async function markClaimUsed(jti){ try{ await supabase.from('claims_issued').update({ used_at: new Date().toISOString() }).eq('jti', jti).is('used_at', null); } catch(e){ console.log('markClaimUsed error', e?.message || e); } }
-async function checkClaimUsed(jti){ if(!jti) return true; const { data } = await supabase.from('claims_issued').select('used_at').eq('jti', jti).maybeSingle(); return !!(data?.used_at); }
+async function checkClaimUsed(jti){ if(!jti) return true; try{ const { data } = await supabase.from('claims_issued').select('used_at').eq('jti', jti).maybeSingle(); return !!(data?.used_at); } catch(e){ return true; } }
 
-// Email builder
 function buildWelcomeEmailHTML({ name, email, claim, membership_id }){
   const claimLink = `${BASE_URL}/discord/login?claim=${encodeURIComponent(claim)}`;
   return `
@@ -84,7 +124,7 @@ function buildWelcomeEmailHTML({ name, email, claim, membership_id }){
   </div>`;
 }
 
-// central handler
+// Core handler
 async function handleConfirmedPayment({ plan_id, email, membership_id, user_name }){
   const jti = crypto.randomUUID();
   const payload = { membership_id, plan_id, user_name, jti };
@@ -104,30 +144,37 @@ async function handleConfirmedPayment({ plan_id, email, membership_id, user_name
   return { claim: token, redirect: `${BASE_URL}/discord/login?claim=${encodeURIComponent(token)}` };
 }
 
-// endpoints
+// Routes
+
+// Server-to-server: expects X-SHARED-SECRET
 app.post('/api/payment/notify', async (req, res) => {
   try {
     const secret = req.get('X-SHARED-SECRET') || '';
     if (!secret || secret !== SHARED_SECRET) return res.status(401).json({ error: 'unauthorized' });
+
     const { plan_id, email, membership_id, user_name } = req.body || {};
     if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
+
     const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
     return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
   } catch (e) { console.error('notify error', e?.message || e); return res.status(500).json({ error: 'server_error' }); }
 });
 
+// Backwards-compatible confirm
 app.post('/api/payment/confirm', async (req, res) => {
   try {
     const secret = req.get('X-SHARED-SECRET') || '';
     if (!secret || secret !== SHARED_SECRET) return res.status(401).json({ error: 'unauthorized' });
+
     const { plan_id, email, membership_id, user_name } = req.body || {};
     if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
+
     const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
     return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
   } catch (e) { console.error('confirm error', e?.message || e); return res.status(500).json({ error: 'server_error' }); }
 });
 
-// braintree webhook
+// Braintree webhook
 app.post('/api/braintree/webhook', express.raw({ type: '*/*' }), async (req, res) => {
   try {
     const bodyStr = req.body.toString('utf8');
@@ -179,7 +226,28 @@ app.post('/api/braintree/webhook', express.raw({ type: '*/*' }), async (req, res
   } catch (e) { console.error('webhook handler error', e?.message || e); return res.status(500).send('server_error'); }
 });
 
-// OAuth & role assignment
+// Public frontend endpoint (safer than exposing SHARED_SECRET in client)
+app.post('/api/frontend/confirm', async (req, res) => {
+  try {
+    const origin = req.get('Origin') || req.get('origin') || '';
+    if (ALLOWED_ORIGINS.length > 0 && origin) {
+      if (!ALLOWED_ORIGINS.includes(origin)) return res.status(403).json({ error: 'origin_not_allowed' });
+    }
+
+    if (FRONTEND_TOKEN) {
+      const sent = req.get('x-frontend-token') || req.body?.frontend_token || '';
+      if (!sent || sent !== FRONTEND_TOKEN) return res.status(401).json({ error: 'invalid_frontend_token' });
+    }
+
+    const { plan_id, email, membership_id, user_name } = req.body || {};
+    if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
+
+    const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
+    return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
+  } catch (e) { console.error('frontend confirm error', e?.message || e); return res.status(500).json({ error: 'server_error' }); }
+});
+
+// Discord OAuth & role assignment
 function requireClaim(req, res, next){
   const { claim } = req.query || {};
   if (!claim) return res.status(401).send('🔒 Enlace inválido. Abre desde tu correo o desde tu sitio.');
@@ -204,6 +272,7 @@ app.get('/discord/callback', async (req, res) => {
     const { code, state } = req.query;
     if (!code || !state) return res.status(400).send('missing_code_or_state');
     const st = jwt.verify(state, JWT_SECRET);
+
     if (await checkClaimUsed(st.jti)) return res.status(409).send('⛔ Este enlace ya fue usado.');
 
     const tRes = await fetch('https://discord.com/api/oauth2/token', {
@@ -217,7 +286,11 @@ app.get('/discord/callback', async (req, res) => {
         redirect_uri: DISCORD_REDIRECT_URL
       })
     });
-    if (!tRes.ok) return res.status(400).send('Error obtaining token');
+    if (!tRes.ok) {
+      const body = await tRes.text();
+      console.error('discord token error', tRes.status, body);
+      return res.status(400).send('Error obtaining token');
+    }
     const tJson = await tRes.json();
     const access_token = tJson.access_token;
 
@@ -236,8 +309,9 @@ app.get('/discord/callback', async (req, res) => {
     let roleToAssign = null;
     const planId = String(st.plan_id || '').trim();
 
-    if (planId === 'plan_mensual') { roleToAssign = ROLE_ID_SENALES; }
-    else if (planId === 'plan_trimestral' || planId === 'plan_anual') { roleToAssign = ROLE_ID_MENTORIA; }
+    if (planId === PLAN_IDS.MENSUAL) { roleToAssign = ROLE_ID_SENALES; }
+    else if (planId === PLAN_IDS.TRIMESTRAL) { roleToAssign = ROLE_ID_MENTORIA; }
+    else if (planId === PLAN_IDS.ANUAL) { roleToAssign = ROLE_ID_ANUAL; }
     else { roleToAssign = ROLE_ID_MENTORIA; }
 
     if (roleToAssign) {
@@ -256,7 +330,7 @@ app.get('/discord/callback', async (req, res) => {
   } catch (e) { console.error('callback error', e?.message || e); return res.status(500).send('OAuth error'); }
 });
 
-// health
+// Health & debug
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 app.get('/_debug/logs', async (_req, res) => {
   try {
@@ -271,5 +345,6 @@ app.listen(PORT, () => {
   console.log('POST /api/payment/notify → expects X-SHARED-SECRET');
   console.log('POST /api/payment/confirm → expects X-SHARED-SECRET');
   console.log('POST /api/braintree/webhook → public endpoint for Braintree webhooks (verifies signature)');
+  console.log('POST /api/frontend/confirm → public endpoint for frontend to notify server (Origin checked / optional FRONTEND_TOKEN)');
   console.log('Discord OAuth callback:', DISCORD_REDIRECT_URL);
 });
