@@ -1,9 +1,5 @@
 // index.js — NAZA.fx BOT (final, Node 18, fetch nativo, SendGrid, Supabase)
-// Flow:
-// 1) Site (backend) -> POST /api/payment/notify (X-SHARED-SECRET header + body { plan_id, email, membership_id, user_name })
-// 2) Bot issues 24h JWT claim, logs to Supabase, sends welcome email (SendGrid), returns redirect to /discord/login?claim=...
-// 3) /discord/login -> starts Discord OAuth (requires claim)
-// 4) /discord/callback -> exchange code, add to guild, assign role (exact match: plan_mensual => señales; plan_trimestral|plan_anual => mentoría), save link, mark claim used, redirect to DISCORD_INVITE_URL or SUCCESS_URL
+// + Braintree webhook + confirm endpoint (modificado)
 
 require('dotenv').config();
 const express = require('express');
@@ -11,8 +7,10 @@ const crypto  = require('crypto');
 const jwt     = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
 const sgMail = require('@sendgrid/mail');
+const braintree = require('braintree');
 
 const app = express();
+// We'll use raw for webhook route separately; default json for others
 app.use(express.json()); // JSON bodies
 
 /* ================== REQUIRED ENV (use exact names) ==================
@@ -34,6 +32,10 @@ ROLE_ID_SENALESDISCORD
 ROLE_ID_MENTORIADISCORD
 LOGO_URL (optional)
 FOOTER_IMAGE_URL (optional)
+BT_MERCHANT_ID
+BT_PUBLIC_KEY
+BT_PRIVATE_KEY
+BT_ENVIRONMENT (Sandbox|Production) - optional
 ================================================================== */
 
 const PORT = process.env.PORT || 3000;
@@ -53,6 +55,15 @@ if (!process.env.SENDGRID_API_KEY) console.warn('⚠️ SENDGRID_API_KEY not set
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const FROM_EMAIL = process.env.FROM_EMAIL || `no-reply@nazatradingacademy.com`;
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@nazatradingacademy.com';
+
+// Braintree gateway (for verifying webhooks)
+const BT_ENV = (process.env.BT_ENVIRONMENT && process.env.BT_ENVIRONMENT.toLowerCase()==='production') ? braintree.Environment.Production : braintree.Environment.Sandbox;
+const gateway = braintree.connect({
+  environment: BT_ENV,
+  merchantId: process.env.BT_MERCHANT_ID || '',
+  publicKey: process.env.BT_PUBLIC_KEY || '',
+  privateKey: process.env.BT_PRIVATE_KEY || ''
+});
 
 // Discord / roles / redirects
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -136,10 +147,28 @@ function buildWelcomeEmailHTML({ name, email, claim, membership_id }){
   </div>`;
 }
 
-/* ================== Endpoint: POST /api/payment/notify ==================
-  Headers: X-SHARED-SECRET
-  Body: { plan_id, email, membership_id, user_name }
-====================================================================== */
+/* ================== Central handler for confirmed payments ================== */
+async function handleConfirmedPayment({ plan_id, email, membership_id, user_name }){
+  const jti = crypto.randomUUID();
+  const payload = { membership_id, plan_id, user_name, jti };
+  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h', jwtid: jti });
+
+  await logEvent(membership_id || jti, 'payment_confirmed', { plan_id, email, membership_id, user_name });
+  await createClaimRecord(jti, membership_id);
+
+  // send email (non-blocking)
+  (async ()=>{
+    try{
+      const html = buildWelcomeEmailHTML({ name: user_name, email, claim: token, membership_id });
+      await sgMail.send({ to: email, from: FROM_EMAIL, subject: `${APP_NAME} — Acceso y pasos (Discord)`, html });
+      console.log('📧 Welcome email sent to', email);
+    }catch(e){ console.error('sendgrid error', e?.message || e); }
+  })();
+
+  return { claim: token, redirect: `${BASE_URL}/discord/login?claim=${encodeURIComponent(token)}` };
+}
+
+/* ================== Endpoint: POST /api/payment/notify (existing) ================== */
 app.post('/api/payment/notify', async (req, res) => {
   try {
     const secret = req.get('X-SHARED-SECRET') || '';
@@ -148,30 +177,123 @@ app.post('/api/payment/notify', async (req, res) => {
     const { plan_id, email, membership_id, user_name } = req.body || {};
     if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
 
-    // create single-use claim
-    const jti = crypto.randomUUID();
-    const payload = { membership_id, plan_id, user_name, jti };
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h', jwtid: jti });
-
-    // log + save claim
-    await logEvent(membership_id || jti, 'payment_notify', { plan_id, email, membership_id, user_name });
-    await createClaimRecord(jti, membership_id);
-
-    // send welcome email (non-blocking)
-    (async () => {
-      try {
-        const html = buildWelcomeEmailHTML({ name: user_name, email, claim: token, membership_id });
-        await sgMail.send({ to: email, from: FROM_EMAIL, subject: `${APP_NAME} — Acceso y pasos (Discord)`, html });
-        console.log('📧 Welcome email sent to', email);
-      } catch (e) {
-        console.error('sendgrid error', e?.message || e);
-      }
-    })();
-
-    return res.json({ ok: true, claim: token, redirect: `${BASE_URL}/discord/login?claim=${encodeURIComponent(token)}` });
+    // create claim + email via central handler
+    const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
+    return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
   } catch (e) {
     console.error('notify error', e?.message || e);
     return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+/* ================== New helper endpoint: site can POST here after processing payment =============
+   POST /api/payment/confirm
+   Headers: X-SHARED-SECRET
+   Body: { plan_id, email, membership_id, user_name }
+   (This is an alias that does same as /api/payment/notify; added for clarity)
+============================================================================================= */
+app.post('/api/payment/confirm', async (req, res) => {
+  // same implementation as notify - keep both for compatibility
+  try {
+    const secret = req.get('X-SHARED-SECRET') || '';
+    if (!secret || secret !== SHARED_SECRET) return res.status(401).json({ error: 'unauthorized' });
+
+    const { plan_id, email, membership_id, user_name } = req.body || {};
+    if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
+
+    const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
+    return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
+  } catch (e) {
+    console.error('confirm error', e?.message || e);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+/* ================== Braintree webhook endpoint ==================
+   POST /api/braintree/webhook
+   Braintree sends bt_signature and bt_payload in body or form-encoded
+   We verify using gateway.webhookNotification.parse(signature, payload)
+================================================================== */
+app.post('/api/braintree/webhook', express.raw({ type: '*/*' }), async (req, res) => {
+  try {
+    // Braintree often posts form-encoded bt_signature & bt_payload
+    const bodyStr = req.body.toString('utf8');
+    // try to extract bt_signature & bt_payload either from raw body or as urlencoded
+    let bt_signature = '', bt_payload = '';
+    const params = new URLSearchParams(bodyStr);
+    if (params.has('bt_signature') && params.has('bt_payload')) {
+      bt_signature = params.get('bt_signature');
+      bt_payload = params.get('bt_payload');
+    } else {
+      // fallback: parse raw as JSON if any
+      try {
+        const parsed = JSON.parse(bodyStr);
+        bt_signature = parsed.bt_signature || parsed.signature || '';
+        bt_payload = parsed.bt_payload || parsed.payload || '';
+      } catch(e){}
+    }
+    if(!bt_signature || !bt_payload) {
+      // nothing to verify; respond 400
+      console.warn('braintree webhook missing signature/payload');
+      return res.status(400).send('missing_signature_or_payload');
+    }
+
+    let notification;
+    try {
+      notification = await gateway.webhookNotification.parse(bt_signature, bt_payload);
+    } catch (e) {
+      console.error('braintree parse error', e?.message || e);
+      return res.status(400).send('invalid_webhook');
+    }
+
+    // Log event
+    await logEvent(notification.timestamp || Date.now(), 'braintree_webhook', { kind: notification.kind, raw: notification });
+
+    // Handle relevant kinds
+    if (notification.kind === braintree.WebhookNotification.Kind.SubscriptionChargedSuccessfully ||
+        notification.kind === 'subscription_charged_successfully') {
+      const subscription = notification.subscription;
+      // subscription.transactions may contain transactions; we can take first transaction's id or subscription.id
+      const plan_id = subscription.planId || null;
+      // You must map subscription.customer or custom fields to membership_id/email in your DB - simplistic approach:
+      // If your subscription has transactions and contains customer details, extract them.
+      const membership_id = subscription.id || null;
+      // NOTE: if you need customer email you must attach it in your site's DB and call /api/payment/notify to the bot instead.
+      // For robustness: we just log and ack.
+      console.log('subscription charged', subscription.id, 'plan', plan_id);
+      // If you have mapping for membership_id->email in Supabase, fetch it and then call handleConfirmedPayment
+      // Example: try to look up in membership_links or another table
+      // Attempt to find membership record
+      let email = null, user_name = null;
+      try {
+        const { data } = await supabase.from('memberships').select('email,user_name').eq('membership_id', subscription.id).maybeSingle();
+        if (data) { email = data.email; user_name = data.user_name; }
+      } catch(e){ /* ignore */ }
+
+      if (email && subscription.id) {
+        await handleConfirmedPayment({ plan_id: (plan_id || 'plan_unknown'), email, membership_id: subscription.id, user_name });
+      }
+    } else if (notification.kind === braintree.WebhookNotification.Kind.TransactionSettled ||
+               notification.kind === 'transaction_settled') {
+      const transaction = notification.transaction;
+      // transaction.customFields may include membership_id/email if your site set them when creating transaction
+      const plan_id = transaction.customFields && transaction.customFields.plan_id ? transaction.customFields.plan_id : (transaction.additionalProcessorResponse || null);
+      const membership_id = transaction.customFields && transaction.customFields.membership_id ? transaction.customFields.membership_id : transaction.orderId || transaction.id;
+      const email = transaction.customer && transaction.customer.email ? transaction.customer.email : null;
+      const user_name = transaction.customer && transaction.customer.firstName ? (transaction.customer.firstName + (transaction.customer.lastName? ' '+transaction.customer.lastName:'')) : null;
+
+      if (email && membership_id) {
+        await handleConfirmedPayment({ plan_id: plan_id || 'plan_unknown', email, membership_id, user_name });
+      }
+    } else {
+      // other event kinds: just log
+      console.log('braintree webhook kind', notification.kind);
+    }
+
+    return res.status(200).send('ok');
+  } catch (e) {
+    console.error('webhook handler error', e?.message || e);
+    return res.status(500).send('server_error');
   }
 });
 
@@ -286,5 +408,7 @@ app.get('/_debug/logs', async (_req, res) => {
 app.listen(PORT, () => {
   console.log('🟢 NAZA.fx BOT running on', BASE_URL);
   console.log('POST /api/payment/notify → expects X-SHARED-SECRET');
+  console.log('POST /api/payment/confirm → expects X-SHARED-SECRET');
+  console.log('POST /api/braintree/webhook → public endpoint for Braintree webhooks (verifies signature)');
   console.log('Discord OAuth callback:', DISCORD_REDIRECT_URL);
 });
