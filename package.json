@@ -1,24 +1,42 @@
 {
   "name": "naza-fx-bot",
   "version": "1.0.0",
-  "description": "NAZA Trading Academy – Discord Access Bot (Braintree → Site → Bot → OAuth → Roles)",
+  "description": "NAZA Trading Academy Bot - Discord OAuth, Braintree Webhooks, Claims y Accesos Automáticos",
   "main": "index.js",
   "type": "commonjs",
-  "engines": {
-    "node": ">=18.x"
-  },
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.3",
-    "@sendgrid/mail": "^7.7.0",
+    "@supabase/supabase-js": "^2.39.6",
+    "braintree": "^3.11.0",
+    "crypto": "^1.0.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^3.3.2",
+    "sendgrid": "^7.7.0",
+    "@sendgrid/mail": "^7.7.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
-  }
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "NAZA",
+    "Trading",
+    "Braintree",
+    "Webhook",
+    "Discord",
+    "OAuth",
+    "Supabase",
+    "SendGrid",
+    "Automation",
+    "Membership"
+  ],
+  "author": "NAZA.fx",
+  "license": "MIT"
 }
