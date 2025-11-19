@@ -1,5 +1,6 @@
 // index.js — NAZA.fx BOT (Node >=18)
-// Ready-to-use: Braintree webhook, secure frontend confirm, Discord OAuth & roles mapping to plan_mensual/plan_trimestral/plan_anual
+// Corrección: usar new braintree.BraintreeGateway(...) en lugar de braintree.connect()
+// Usa fetch global (Node 18+). Mantiene endpoints y lógica previa.
 
 require('dotenv').config();
 const express = require('express');
@@ -10,7 +11,6 @@ const sgMail = require('@sendgrid/mail');
 const braintree = require('braintree');
 const rateLimit = require('express-rate-limit');
 const cors = require('cors');
-const fetch = require('node-fetch');
 
 const app = express();
 app.use(express.json());
@@ -53,10 +53,10 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
 const FROM_EMAIL = process.env.FROM_EMAIL || `no-reply@nazatradingacademy.com`;
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@nazatradingacademy.com';
 
-// Braintree (support BRAINTREE_* and BT_* env names)
+// Braintree: usar BraintreeGateway (compatible con Node 18+ / 25+)
 const BT_ENV_RAW = (process.env.BRAINTREE_ENV || process.env.BT_ENVIRONMENT || 'sandbox').toLowerCase();
 const BT_ENV = (BT_ENV_RAW === 'production' || BT_ENV_RAW === 'prod') ? braintree.Environment.Production : braintree.Environment.Sandbox;
-const gateway = braintree.connect({
+const gateway = new braintree.BraintreeGateway({
   environment: BT_ENV,
   merchantId: process.env.BRAINTREE_MERCHANT_ID || process.env.BT_MERCHANT_ID || '',
   publicKey: process.env.BRAINTREE_PUBLIC_KEY || process.env.BT_PUBLIC_KEY || '',
@@ -77,7 +77,7 @@ const ROLE_ID_SENALES = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_I
 const ROLE_ID_MENTORIA = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_MENTORIA || null;
 const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUAL || ROLE_ID_MENTORIA || null;
 
-// Official plan ids (exact)
+// Official plan ids
 const PLAN_IDS = {
   MENSUAL: "plan_mensual",
   TRIMESTRAL: "plan_trimestral",
@@ -145,8 +145,6 @@ async function handleConfirmedPayment({ plan_id, email, membership_id, user_name
 }
 
 // Routes
-
-// Server-to-server: expects X-SHARED-SECRET
 app.post('/api/payment/notify', async (req, res) => {
   try {
     const secret = req.get('X-SHARED-SECRET') || '';
@@ -160,7 +158,6 @@ app.post('/api/payment/notify', async (req, res) => {
   } catch (e) { console.error('notify error', e?.message || e); return res.status(500).json({ error: 'server_error' }); }
 });
 
-// Backwards-compatible confirm
 app.post('/api/payment/confirm', async (req, res) => {
   try {
     const secret = req.get('X-SHARED-SECRET') || '';
@@ -226,7 +223,7 @@ app.post('/api/braintree/webhook', express.raw({ type: '*/*' }), async (req, res
   } catch (e) { console.error('webhook handler error', e?.message || e); return res.status(500).send('server_error'); }
 });
 
-// Public frontend endpoint (safer than exposing SHARED_SECRET in client)
+// Frontend public endpoint
 app.post('/api/frontend/confirm', async (req, res) => {
   try {
     const origin = req.get('Origin') || req.get('origin') || '';
