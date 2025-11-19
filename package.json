@@ -1,6 +1,6 @@
 {
   "name": "naza-fx-bot",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "NAZA Trading Academy Bot - Discord OAuth, Braintree Webhooks, Claims y Accesos Automáticos",
   "main": "index.js",
   "type": "commonjs",
@@ -14,7 +14,6 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "node-fetch": "^3.3.2",
     "@sendgrid/mail": "^7.7.0",
     "cors": "^2.8.5",
     "express-rate-limit": "^6.7.0"
