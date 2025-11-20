@@ -24,18 +24,6 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": [
-    "NAZA",
-    "Trading",
-    "Braintree",
-    "Webhook",
-    "Discord",
-    "OAuth",
-    "Supabase",
-    "SendGrid",
-    "Automation",
-    "Membership"
-  ],
   "author": "NAZA.fx",
   "license": "MIT"
 }
