@@ -127,7 +127,8 @@ function buildWelcomeEmailHTML({ name, email, claim, membership_id }){
 // Core handler
 async function handleConfirmedPayment({ plan_id, email, membership_id, user_name }){
   const jti = crypto.randomUUID();
-  const payload = { membership_id, plan_id, user_name, jti };
+  // Do not include jti inside payload when using jwtid option
+  const payload = { membership_id, plan_id, user_name };
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h', jwtid: jti });
 
   await logEvent(membership_id || jti, 'payment_confirmed', { plan_id, email, membership_id, user_name });
@@ -144,14 +145,50 @@ async function handleConfirmedPayment({ plan_id, email, membership_id, user_name
   return { claim: token, redirect: `${BASE_URL}/discord/login?claim=${encodeURIComponent(token)}` };
 }
 
+// ---------------------------
+// PRODUCT_NAME -> PLAN_ID MAP
+// ---------------------------
+// Mapping uses light normalization (option 2): remove emojis, lowercase, trim, collapse spaces
+const PRODUCT_NAME_TO_PLAN = {
+  'plan mensual de señales 🛰️': PLAN_IDS.MENSUAL,
+  'educación desde cero🧑‍🚀👩‍🚀': PLAN_IDS.TRIMESTRAL,
+  'educación total 🏅': PLAN_IDS.ANUAL
+};
+
+function removeEmojisAndTrim(s){
+  if(!s) return '';
+  # Remove most emoji/pictographs using a Unicode range heuristics
+  # This is a lightweight approach that matches common emojis used in your product names.
+  return String(s).replace(/([\u231A-\u32FF\uD83C-\uDBFF\uDC00-\uDFFF\u200D])/g, '').replace(/\s+/g,' ').trim();
+}
+
+function normalizeName(s){
+  if(!s) return '';
+  return removeEmojisAndTrim(String(s)).toLowerCase().replace(/\s+/g,' ').trim();
+}
+
+function resolvePlanId({ plan_id, product_name }){
+  if (plan_id && String(plan_id).trim()) return String(plan_id).trim();
+  const normalized = normalizeName(product_name);
+  if (!normalized) return null;
+  for (const [key, val] of Object.entries(PRODUCT_NAME_TO_PLAN)){
+    if (normalizeName(key) === normalized) return val;
+  }
+  return null;
+}
+
 // Routes
 app.post('/api/payment/notify', async (req, res) => {
   try {
     const secret = req.get('X-SHARED-SECRET') || '';
     if (!secret || secret !== SHARED_SECRET) return res.status(401).json({ error: 'unauthorized' });
 
-    const { plan_id, email, membership_id, user_name } = req.body || {};
-    if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
+    const { plan_id: incoming_plan, product_name, email, membership_id, user_name } = req.body || {};
+    const plan_id = resolvePlanId({ plan_id: incoming_plan, product_name });
+    if (!plan_id || !email || !membership_id) {
+      console.error('missing_fields_or_plan_not_resolved', { plan_id: plan_id || null, incoming_plan, product_name });
+      return res.status(400).json({ error: 'missing_fields_or_plan_not_resolved' });
+    }
 
     const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
     return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
@@ -163,8 +200,12 @@ app.post('/api/payment/confirm', async (req, res) => {
     const secret = req.get('X-SHARED-SECRET') || '';
     if (!secret || secret !== SHARED_SECRET) return res.status(401).json({ error: 'unauthorized' });
 
-    const { plan_id, email, membership_id, user_name } = req.body || {};
-    if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
+    const { plan_id: incoming_plan, product_name, email, membership_id, user_name } = req.body || {};
+    const plan_id = resolvePlanId({ plan_id: incoming_plan, product_name });
+    if (!plan_id || !email || !membership_id) {
+      console.error('missing_fields_or_plan_not_resolved', { plan_id: plan_id || null, incoming_plan, product_name });
+      return res.status(400).json({ error: 'missing_fields_or_plan_not_resolved' });
+    }
 
     const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
     return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
@@ -199,22 +240,34 @@ app.post('/api/braintree/webhook', express.raw({ type: '*/*' }), async (req, res
     if (notification.kind === braintree.WebhookNotification.Kind.SubscriptionChargedSuccessfully ||
         notification.kind === 'subscription_charged_successfully') {
       const subscription = notification.subscription;
-      const plan_id = subscription.planId || null;
+      const incoming_plan = subscription.planId || null;
+      const incoming_product_name = subscription.name || null;
+      const plan_id = resolvePlanId({ plan_id: incoming_plan, product_name: incoming_product_name });
       const membership_id = subscription.id || null;
       let email = null, user_name = null;
       try {
         const { data } = await supabase.from('memberships').select('email,user_name').eq('membership_id', subscription.id).maybeSingle();
         if (data) { email = data.email; user_name = data.user_name; }
       } catch(e){}
-      if (email && subscription.id) { await handleConfirmedPayment({ plan_id: (plan_id || 'plan_unknown'), email, membership_id: subscription.id, user_name }); }
+      if (email && membership_id && plan_id) {
+        await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
+      } else {
+        console.warn('braintree subscription webhook skipped - missing plan or email or membership', { plan_id, incoming_plan, incoming_product_name, membership_id, email });
+      }
     } else if (notification.kind === braintree.WebhookNotification.Kind.TransactionSettled ||
                notification.kind === 'transaction_settled') {
       const transaction = notification.transaction;
-      const plan_id = transaction.customFields && transaction.customFields.plan_id ? transaction.customFields.plan_id : null;
+      const incoming_plan = transaction.customFields && transaction.customFields.plan_id ? transaction.customFields.plan_id : null;
+      const incoming_product_name = transaction.customFields && transaction.customFields.product_name ? transaction.customFields.product_name : null;
+      const plan_id = resolvePlanId({ plan_id: incoming_plan, product_name: incoming_product_name });
       const membership_id = transaction.customFields && transaction.customFields.membership_id ? transaction.customFields.membership_id : transaction.orderId || transaction.id;
       const email = transaction.customer && transaction.customer.email ? transaction.customer.email : null;
       const user_name = transaction.customer && transaction.customer.firstName ? (transaction.customer.firstName + (transaction.customer.lastName? ' '+transaction.customer.lastName:'')) : null;
-      if (email && membership_id) { await handleConfirmedPayment({ plan_id: plan_id || 'plan_unknown', email, membership_id, user_name }); }
+      if (email && membership_id && plan_id) {
+        await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
+      } else {
+        console.warn('braintree webhook skipped - missing plan or email or membership', { plan_id, incoming_plan, incoming_product_name, membership_id, email });
+      }
     } else {
       console.log('braintree webhook kind', notification.kind);
     }
@@ -236,7 +289,8 @@ app.post('/api/frontend/confirm', async (req, res) => {
       if (!sent || sent !== FRONTEND_TOKEN) return res.status(401).json({ error: 'invalid_frontend_token' });
     }
 
-    const { plan_id, email, membership_id, user_name } = req.body || {};
+    const { plan_id: incoming_plan, product_name, email, membership_id, user_name } = req.body || {};
+    const plan_id = resolvePlanId({ plan_id: incoming_plan, product_name });
     if (!plan_id || !email || !membership_id) return res.status(400).json({ error: 'missing_fields' });
 
     const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
