@@ -91,7 +91,7 @@ const PRODUCT_NAME_TO_PLAN = {
   'educación total 🏅': PLAN_IDS.ANUAL
 };
 
-// Normalización ligera (opción 2)
+// Normalización ligera (opción 2) — elimina emojis y limpia espacios
 function removeEmojisAndTrim(s){
   if(!s) return '';
   return String(s)
@@ -337,6 +337,11 @@ app.get('/discord/callback', async (req, res) => {
     return res.status(500).send('OAuth error');
   }
 });
+
+// Health check for Render
+app.get('/health', (_req, res) =>
+  res.status(200).json({ ok: true, ts: new Date().toISOString() })
+);
 
 app.listen(PORT, () => {
   console.log('🟢 NAZA.fx BOT running on', BASE_URL);
