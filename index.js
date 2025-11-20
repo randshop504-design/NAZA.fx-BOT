@@ -46,7 +46,6 @@ const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE || '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
 
 // SendGrid
-if (!process.env.SENDGRID_API_KEY) console.warn('⚠️ SENDGRID_API_KEY not set');
 sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
 const FROM_EMAIL = process.env.FROM_EMAIL || `no-reply@nazatradingacademy.com`;
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@nazatradingacademy.com';
@@ -57,16 +56,16 @@ const BT_ENV = (BT_ENV_RAW === 'production' || BT_ENV_RAW === 'prod') ? braintre
 
 const gateway = new braintree.BraintreeGateway({
   environment: BT_ENV,
-  merchantId: process.env.BRAINTREE_MERCHANT_ID || process.env.BT_MERCHANT_ID || '',
-  publicKey: process.env.BRAINTREE_PUBLIC_KEY || process.env.BT_PUBLIC_KEY || '',
-  privateKey: process.env.BRAINTREE_PRIVATE_KEY || process.env.BT_PRIVATE_KEY || ''
+  merchantId: process.env.BRAINTREE_MERCHANT_ID || '',
+  publicKey: process.env.BRAINTREE_PUBLIC_KEY || '',
+  privateKey: process.env.BRAINTREE_PRIVATE_KEY || ''
 });
 
 // Discord
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
-const GUILD_ID = process.env.GUILD_ID || process.env.DISCORD_GUILD_ID || '';
+const GUILD_ID = process.env.GUILD_ID || '';
 const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL || `${BASE_URL}/discord/callback`;
 const DISCORD_INVITE_URL = process.env.DISCORD_INVITE_URL || null;
 const SUCCESS_URL = process.env.SUCCESS_URL || `${BASE_URL}/success`;
@@ -74,7 +73,7 @@ const SUCCESS_URL = process.env.SUCCESS_URL || `${BASE_URL}/success`;
 // Role IDs
 const ROLE_ID_SENALES = process.env.ROLE_ID_SENALES || null;
 const ROLE_ID_MENTORIA = process.env.ROLE_ID_MENTORIA || null;
-const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUAL || ROLE_ID_MENTORIA || null;
+const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUAL || process.env.ROLE_ID_MENTORIA || null;
 
 // Official plan ids
 const PLAN_IDS = {
@@ -111,6 +110,7 @@ function normalizeName(s){
 
 function resolvePlanId({ plan_id, product_name }){
   if (plan_id && String(plan_id).trim()) return String(plan_id).trim();
+
   const normalized = normalizeName(product_name);
   if (!normalized) return null;
 
@@ -121,8 +121,6 @@ function resolvePlanId({ plan_id, product_name }){
 }
 
 // Helpers
-function escapeHtml(s){ if(!s) return ''; return String(s).replace(/[&<>"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' })[c]); }
-
 async function logEvent(event_id, event_type, data){
   try{
     await supabase.from('webhook_logs').insert({ event_id, event_type, data });
@@ -179,6 +177,7 @@ function buildWelcomeEmailHTML({ name, email, claim }){
 async function handleConfirmedPayment({ plan_id, email, membership_id, user_name }){
   const jti = crypto.randomUUID();
   const payload = { membership_id, plan_id, user_name };
+
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h', jwtid: jti });
 
   await logEvent(membership_id, 'payment_confirmed', { plan_id, email, membership_id, user_name });
@@ -262,7 +261,6 @@ app.get('/discord/login', requireClaim, (req, res) => {
   const state = jwt.sign({
     ts: Date.now(),
     membership_id: req.claim.membership_id,
-    jti: req.claim.sub,
     plan_id: req.claim.plan_id
   }, JWT_SECRET, { expiresIn: '10m' });
 
@@ -313,7 +311,7 @@ app.get('/discord/callback', async (req, res) => {
         },
         body: JSON.stringify({ access_token })
       });
-    }catch{}
+    }catch(e){}
 
     let roleToAssign = null;
     const planId = String(st.plan_id || '').trim();
@@ -328,13 +326,12 @@ app.get('/discord/callback', async (req, res) => {
           method: 'PUT',
           headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` }
         });
-      }catch{}
+      }catch(e){}
     }
 
     await upsertLink(st.membership_id, me.id);
 
-    const redirectTo = DISCORD_INVITE_URL || SUCCESS_URL;
-    return res.redirect(redirectTo);
+    return res.redirect(DISCORD_INVITE_URL || SUCCESS_URL);
 
   }catch(e){
     return res.status(500).send('OAuth error');
