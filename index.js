@@ -366,28 +366,51 @@ app.post('/api/payment/process', async (req, res) => {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
-    const { product_name, plan_id: incoming_plan, email, membership_id, user_name, payment_method_nonce } = req.body || {};
+    // ---------------------------
+    // AQUI: cambio autorizado por ti:
+    //  - si falta plan_id, NO abortamos; marcamos pending y NO creamos subscription ni otorgamos rol
+    //  - si falta membership_id, lo generamos automáticamente
+    // ---------------------------
+    const { product_name, plan_id: incoming_plan, email, membership_id: incoming_membership_id, user_name, payment_method_nonce } = req.body || {};
 
-    const plan_id = resolvePlanId({ plan_id: incoming_plan, product_name });
-    if (!plan_id || !email || !membership_id) {
-      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'missing_fields', error_message: 'plan_id, email or membership_id missing' });
-      return res.status(400).json({ error: 'missing_fields_or_plan_not_resolved' });
+    // Intentar resolver plan con lógica existente
+    let plan_id = resolvePlanId({ plan_id: incoming_plan, product_name });
+    let plan_missing = false;
+
+    // Si resolvePlanId no encontró nada, no forzamos fallback a un plan; marcamos plan_missing
+    if (!plan_id) {
+      plan_missing = true;
     }
 
+    // Email sigue siendo obligatorio
+    if (!email) {
+      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'missing_email', error_message: 'email missing', plan_id });
+      return res.status(400).json({ error: 'missing_email' });
+    }
+
+    // Si no viene membership_id, lo generamos automáticamente
+    let membership_id = incoming_membership_id;
+    if (!membership_id) {
+      membership_id = crypto.randomUUID();
+      console.log('Auto-created membership_id for payment flow:', membership_id);
+      await logEvent(membership_id, 'membership_auto_created', { source: 'auto_generated', email, plan_id: plan_id || null });
+    }
+
+    // payment_method_nonce is required to create paymentMethod/customer (we keep this check)
     if (!payment_method_nonce) {
       await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'missing_nonce', plan_id });
       return res.status(400).json({ error: 'payment_method_nonce_required' });
     }
 
-    // Create customer in Braintree
+    // Create customer in Braintree (same as before)
     let customerId = null;
     try {
-      const custRes = await gateway.customer.create({ 
-        email, 
-        firstName: user_name || '', 
-        customFields: { membership_id } 
+      const custRes = await gateway.customer.create({
+        email,
+        firstName: user_name || '',
+        customFields: { membership_id }
       });
-      
+
       if (custRes.success) {
         customerId = custRes.customer.id;
       } else {
@@ -399,7 +422,7 @@ app.post('/api/payment/process', async (req, res) => {
       return res.status(500).json({ error: 'customer_creation_error', message: e.message });
     }
 
-    // Create payment method with nonce
+    // Create payment method with nonce (same as before)
     let paymentMethodToken = null;
     let card_last4 = null;
     let card_type = null;
@@ -418,13 +441,13 @@ app.post('/api/payment/process', async (req, res) => {
         card_type = pmRes.paymentMethod.cardType || null;
         card_fingerprint = pmRes.paymentMethod.uniqueNumberIdentifier || null;
       } else {
-        await logFailedAttempt({ 
-          email, 
-          ip_address, 
-          user_agent, 
-          failure_type: 'payment_method_creation_failed', 
-          error_message: pmRes.message, 
-          plan_id 
+        await logFailedAttempt({
+          email,
+          ip_address,
+          user_agent,
+          failure_type: 'payment_method_creation_failed',
+          error_message: pmRes.message,
+          plan_id
         });
         return res.status(400).json({ error: 'card_verification_failed', detail: pmRes.message });
       }
@@ -452,7 +475,39 @@ app.post('/api/payment/process', async (req, res) => {
       });
     }
 
-    // Create subscription
+    // Si falta plan (plan_missing === true) -> NO crear suscripción ni otorgar rol.
+    // En su lugar: guardar membership con estado 'pending' y plan_id: null (o 'plan_unknown').
+    if (plan_missing) {
+      try {
+        if (supabase) {
+          await supabase.from('memberships').insert({
+            membership_id,
+            email,
+            user_name: user_name || null,
+            plan_id: null,
+            plan_name: product_name || null,
+            amount_paid: null,
+            currency: 'USD',
+            braintree_subscription_id: null,
+            braintree_customer_id: customerId,
+            braintree_payment_method_token: paymentMethodToken,
+            card_last4,
+            card_type,
+            status: 'pending',
+            activated_at: null,
+            ip_address,
+            user_agent
+          });
+        }
+        await logEvent(membership_id, 'membership_created_pending_plan_missing', { email, product_name, incoming_plan });
+        return res.json({ ok: true, membership_id, status: 'pending', message: 'plan_missing' });
+      } catch (e) {
+        await logFailedAttempt({ email, card_last4, ip_address, user_agent, failure_type: 'membership_save_failed', error_message: e.message, plan_id: null });
+        return res.status(500).json({ error: 'membership_save_failed', message: e.message });
+      }
+    }
+
+    // Si llegamos aquí, plan_id está definido -> proceder con creación de subscription (flujo original)
     let subscriptionId = null;
     let amount_paid = null;
     let transactionId = null;
