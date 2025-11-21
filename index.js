@@ -91,15 +91,15 @@ const PLAN_IDS = {
 
 // PRODUCT -> PLAN map (textual, usado para product_name)
 const PRODUCT_NAME_TO_PLAN = {
-  'plan mensual de señales 🛰️': PLAN_IDS.MENSUAL,
-  'plan mensual de señales': PLAN_IDS.MENSUAL,
-  'educación desde cero🧑‍🚀👩‍🚀': PLAN_IDS.TRIMESTRAL,
-  'educación desde cero': PLAN_IDS.TRIMESTRAL,
-  'educación total 🏅': PLAN_IDS.ANUAL,
-  'educación total': PLAN_IDS.ANUAL,
-  'educacion desde cero': PLAN_IDS.TRIMESTRAL,
-  'educacion total': PLAN_IDS.ANUAL,
-  'plan anual': PLAN_IDS.ANUAL
+  'plan mensual de señales 🛰️': PLAN_MENSUAL,
+  'plan mensual de señales': PLAN_MENSUAL,
+  'educación desde cero🧑‍🚀👩‍🚀': PLAN_TRIMESTRAL,
+  'educación desde cero': PLAN_TRIMESTRAL,
+  'educación total 🏅': PLAN_ANUAL,
+  'educación total': PLAN_ANUAL,
+  'educacion desde cero': PLAN_TRIMESTRAL,
+  'educacion total': PLAN_ANUAL,
+  'plan anual': PLAN_ANUAL
 };
 
 // ---------- Helpers ----------
@@ -333,9 +333,9 @@ async function removeDiscordRole(discordId, roleId){
 
 function roleForPlan(planId){
   if (!planId) return null;
-  if (planId === PLAN_IDS.MENSUAL) return ROLE_ID_SENALES;
-  if (planId === PLAN_IDS.TRIMESTRAL) return ROLE_ID_MENTORIA;
-  if (planId === PLAN_IDS.ANUAL) return ROLE_ID_ANUAL;
+  if (planId === PLAN_MENSUAL) return ROLE_ID_SENALES;
+  if (planId === PLAN_TRIMESTRAL) return ROLE_ID_MENTORIA;
+  if (planId === PLAN_ANUAL) return ROLE_ID_ANUAL;
   return ROLE_ID_MENTORIA;
 }
 
