@@ -717,3 +717,4 @@ app.listen(PORT, () => {
   console.log('⏳ WAIT_FOR_WEBHOOK:', WAIT_FOR_WEBHOOK);
   console.log('📊 Supabase:', supabase ? 'CONNECTED' : 'NOT CONFIGURED');
   console.log('💳 Braintree:', BT_ENV === braintree.Environment.Production ? 'PRODUCTION' : 'SANDBOX');
+});
