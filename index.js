@@ -34,7 +34,7 @@ const corsOptions = {
     callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'X-SHARED-SECRET', 'x-frontend-token']
+  allowedHeaders: ['Content-Type', 'X-SHARED-SECRET', 'x-frontend-token', 'X-Frontend-Token']
 };
 app.use(cors(corsOptions));
 
@@ -44,8 +44,11 @@ const APP_NAME = process.env.APP_NAME || 'NAZA Trading Academy';
 
 const SHARED_SECRET = process.env.SHARED_SECRET || 'NazaFx8upexSecretKey_2024_zzu12AA';
 const JWT_SECRET = process.env.JWT_SECRET || 'alexi3i020wi$$$!';
-const FRONTEND_TOKEN = (typeof process.env.FRONTEND_TOKEN === 'undefined') ? 'NAZA_TEST_123' : process.env.FRONTEND_TOKEN;
-const WAIT_FOR_WEBHOOK = (process.env.WAIT_FOR_WEBHOOK || 'true').toLowerCase() === 'true';
+// Sólo activar FRONTEND_TOKEN si está definido explícitamente en el entorno.
+// Si no está definido, asumimos que no se requiere este header.
+const FRONTEND_TOKEN = process.env.FRONTEND_TOKEN ? String(process.env.FRONTEND_TOKEN) : null;
+// Por defecto WAIT_FOR_WEBHOOK = false a menos que se defina explícitamente como 'true' en env
+const WAIT_FOR_WEBHOOK = (typeof process.env.WAIT_FOR_WEBHOOK !== 'undefined') ? (String(process.env.WAIT_FOR_WEBHOOK).toLowerCase() === 'true') : false;
 
 // Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -250,17 +253,24 @@ app.post('/api/payment/process', async (req, res) => {
       return res.status(403).json({ error: 'origin_not_allowed' });
     }
 
+    // Validación opcional del token frontal (solo si FRONTEND_TOKEN fue configurado)
     if (FRONTEND_TOKEN) {
-      const sent = req.get('x-frontend-token') || req.body?.frontend_token || '';
+      const sentHeader = req.get('x-frontend-token') || req.get('X-Frontend-Token') || '';
+      const sentBody = req.body?.frontend_token || '';
+      const sent = sentHeader || sentBody || '';
+      console.log('DEBUG headers: x-frontend-token present?', !!sentHeader, 'value (masked):', sent ? (sent.slice(0,4) + '...') : '(none)');
       if (!sent || sent !== FRONTEND_TOKEN) {
-        await logFailedAttempt({ ip_address, user_agent, failure_type: 'invalid_frontend_token' });
+        await logFailedAttempt({ ip_address, user_agent, failure_type: 'invalid_frontend_token', error_message: `received:${sent ? sent.slice(0,8) : '(none)'}` });
         return res.status(401).json({ error: 'invalid_frontend_token' });
       }
     }
 
-    const secret = req.get('X-SHARED-SECRET') || req.body?.shared_secret || '';
+    const secretHeader = req.get('X-SHARED-SECRET') || req.get('x-shared-secret') || '';
+    const secretBody = req.body?.shared_secret || '';
+    const secret = secretHeader || secretBody || '';
+    console.log('DEBUG shared-secret present?', !!secret, 'headerUsed?', !!secretHeader);
     if (!secret || secret !== SHARED_SECRET) {
-      await logFailedAttempt({ ip_address, user_agent, failure_type: 'unauthorized' });
+      await logFailedAttempt({ ip_address, user_agent, failure_type: 'unauthorized', error_message: `missing_or_invalid_shared_secret` });
       return res.status(401).json({ error: 'unauthorized' });
     }
 
