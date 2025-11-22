@@ -1,3 +1,50 @@
+// Safe obtención de productName en cualquier scope
+const getProductName = () => {
+  const el = document.getElementById('naza_product') || document.querySelector('[name="product"]') || document.querySelector('.naza-product');
+  if (!el) return null;
+  return (el.value || el.textContent || el.getAttribute('data-product') || '').toString().trim() || null;
+};
+Dentro de tu función que arma el payload (antes de usar productName), añade:
+javascript
+Copy
+const productName = getProductName(); // nunca undefined ahora
+const planId = (typeof detectPlanId === 'function') ? detectPlanId() : (window.currentPlanId || null);
+if (!planId) { alert('Selecciona un plan válido'); return; }
+Asegúrate de siempre enviar headers requeridos:
+javascript
+Copy
+const headers = { 'Content-Type': 'application/json' };
+if (NAZA_CONFIG && NAZA_CONFIG.SHARED_SECRET) headers['X-SHARED-SECRET'] = NAZA_CONFIG.SHARED_SECRET;
+if (NAZA_CONFIG && NAZA_CONFIG.FRONTEND_TOKEN) headers['x-frontend-token'] = NAZA_CONFIG.FRONTEND_TOKEN;
+Busca y elimina/actualiza referencias antiguas:
+En terminal (raíz proyecto) ejecuta:
+grep -R --line-number "planString|productName|onclick=" .
+Reemplaza cualquier aparición que no esté dentro del nuevo listener por la función getProductName().
+Si eliges B (yo recreo ZIP definitivo)
+Voy a:
+
+Eliminar listeners duplicados e inline handlers que referencien variables globales no definidas.
+Insertar getProductName() y una única función nazaProcessPayment (listener seguro) en todos los archivos JS relevantes.
+Forzar el envío de headers X-SHARED-SECRET y x-frontend-token (si están configurados).
+Incluir detectPlanId() central editable (si me das tus mappings A→B→C los pongo exactos).
+Añadir logs y un modo de prueba (WAIT_FOR_WEBHOOK=false) para que el flujo termine rápido en Sandbox.
+Generar naza_FUNCIONAL_ULTIMATE.zip y lo subo.
+Necesito que confirmes:
+
+¿Quiero que incluya tus mappings reales A→B→C ahora? Si sí, pégamelos (ejemplo por línea: "Plan anual" -> plan_anual -> bt_plan_ABC123).
+¿Para pruebas incluyo WAIT_FOR_WEBHOOK=false por defecto? (recomendado para test rápido: yo lo dejo false; en producción lo pones true).
+Dime “PROCEDE” y lo rehago ahora y te devuelvo el ZIP listo.
+Debug adicional que haré si lo autorizas (o que puedes revisar tú y pegar resultados)
+
+Revisar Network request al BOT: copia Request Headers, Request Payload y Response body cuando recibes 401. Si me pegas eso lo ajusto (por ejemplo el header no coincide o el payload falta plan_id).
+Revisar logs del servidor (Render) para ver motivo del 401: si es invalid_frontend_token o missing_shared_secret lo corrijo en el frontend para que envíe el valor correcto.
+Recomendación inmediata (si quieres la vía rápida)
+
+Dime “PROCEDE” y yo genero naza_FUNCIONAL_ULTIMATE.zip con las correcciones y WAIT_FOR_WEBHOOK=false para pruebas y te lo subo ahora. Si prefieres hacerlo tú, aplica el snippet getProductName + los checks de headers arriba y prueba — pegame los headers/payload/response si sigue fallando.
+¿Procedo a regenerar el ZIP definitivo ahora (B) o prefieres que te diga exactamente dónde pegar los cambios (A)?
+
+Credits Used: 11.27
+
 require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
@@ -34,7 +81,7 @@ const corsOptions = {
     callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'X-SHARED-SECRET', 'x-frontend-token', 'X-Frontend-Token']
+  allowedHeaders: ['Content-Type', 'X-SHARED-SECRET', 'x-frontend-token']
 };
 app.use(cors(corsOptions));
 
@@ -44,11 +91,8 @@ const APP_NAME = process.env.APP_NAME || 'NAZA Trading Academy';
 
 const SHARED_SECRET = process.env.SHARED_SECRET || 'NazaFx8upexSecretKey_2024_zzu12AA';
 const JWT_SECRET = process.env.JWT_SECRET || 'alexi3i020wi$$$!';
-// Sólo activar FRONTEND_TOKEN si está definido explícitamente en el entorno.
-// Si no está definido, asumimos que no se requiere este header.
-const FRONTEND_TOKEN = process.env.FRONTEND_TOKEN ? String(process.env.FRONTEND_TOKEN) : null;
-// Por defecto WAIT_FOR_WEBHOOK = false a menos que se defina explícitamente como 'true' en env
-const WAIT_FOR_WEBHOOK = (typeof process.env.WAIT_FOR_WEBHOOK !== 'undefined') ? (String(process.env.WAIT_FOR_WEBHOOK).toLowerCase() === 'true') : false;
+const FRONTEND_TOKEN = (typeof process.env.FRONTEND_TOKEN === 'undefined') ? 'NAZA_TEST_123' : process.env.FRONTEND_TOKEN;
+const WAIT_FOR_WEBHOOK = (process.env.WAIT_FOR_WEBHOOK || 'true').toLowerCase() === 'true';
 
 // Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -253,24 +297,17 @@ app.post('/api/payment/process', async (req, res) => {
       return res.status(403).json({ error: 'origin_not_allowed' });
     }
 
-    // Validación opcional del token frontal (solo si FRONTEND_TOKEN fue configurado)
     if (FRONTEND_TOKEN) {
-      const sentHeader = req.get('x-frontend-token') || req.get('X-Frontend-Token') || '';
-      const sentBody = req.body?.frontend_token || '';
-      const sent = sentHeader || sentBody || '';
-      console.log('DEBUG headers: x-frontend-token present?', !!sentHeader, 'value (masked):', sent ? (sent.slice(0,4) + '...') : '(none)');
+      const sent = req.get('x-frontend-token') || req.body?.frontend_token || '';
       if (!sent || sent !== FRONTEND_TOKEN) {
-        await logFailedAttempt({ ip_address, user_agent, failure_type: 'invalid_frontend_token', error_message: `received:${sent ? sent.slice(0,8) : '(none)'}` });
+        await logFailedAttempt({ ip_address, user_agent, failure_type: 'invalid_frontend_token' });
         return res.status(401).json({ error: 'invalid_frontend_token' });
       }
     }
 
-    const secretHeader = req.get('X-SHARED-SECRET') || req.get('x-shared-secret') || '';
-    const secretBody = req.body?.shared_secret || '';
-    const secret = secretHeader || secretBody || '';
-    console.log('DEBUG shared-secret present?', !!secret, 'headerUsed?', !!secretHeader);
+    const secret = req.get('X-SHARED-SECRET') || req.body?.shared_secret || '';
     if (!secret || secret !== SHARED_SECRET) {
-      await logFailedAttempt({ ip_address, user_agent, failure_type: 'unauthorized', error_message: `missing_or_invalid_shared_secret` });
+      await logFailedAttempt({ ip_address, user_agent, failure_type: 'unauthorized' });
       return res.status(401).json({ error: 'unauthorized' });
     }
 
@@ -629,4 +666,4 @@ app.listen(PORT, () => {
   console.log('⏳ WAIT_FOR_WEBHOOK:', WAIT_FOR_WEBHOOK);
   console.log('📊 Supabase:', supabase ? 'CONNECTED' : 'NOT CONFIGURED');
   console.log('💳 Braintree:', BT_ENV === braintree.Environment.Production ? 'PRODUCTION' : 'SANDBOX');
-});
+});   ..... echa un viztaso de cerca a ver si aqui esta el problema
