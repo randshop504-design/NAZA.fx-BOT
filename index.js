@@ -264,6 +264,8 @@ app.post('/api/payment/process', async (req, res) => {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
+    // NOTE: Important security rule enforced: the server will NOT create customers / payment methods / subscriptions here.
+    // The flow is: frontend / drop-in captures nonce -> the bot stores the pending request -> Braintree will later send webhook -> bot activates.
     const { product_name, plan_id, email, membership_id, user_name, payment_method_nonce } = req.body || {};
 
     if (!plan_id || !email || !membership_id) {
@@ -271,134 +273,38 @@ app.post('/api/payment/process', async (req, res) => {
       return res.status(400).json({ error: 'missing_required_fields' });
     }
 
-    if (!payment_method_nonce) {
-      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'missing_nonce', plan_id });
-      return res.status(400).json({ error: 'payment_method_nonce_required' });
-    }
-
-    // Create or fetch customer
-    let customerId = null;
+    // Save membership as pending and store nonce for audit (optionally encrypted in production)
     try {
-      const custRes = await gateway.customer.create({ email, firstName: user_name || '', customFields: { membership_id } });
-      if (custRes.success) {
-        customerId = custRes.customer.id;
-      } else {
-        await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'customer_creation_failed', error_message: custRes.message, plan_id });
-        return res.status(400).json({ error: 'customer_creation_failed', detail: custRes.message });
+      if (supabase) {
+        await supabase.from('memberships').upsert({
+          membership_id,
+          email,
+          user_name: user_name || null,
+          plan_id,
+          plan_name: product_name || null,
+          amount_paid: null,
+          currency: 'USD',
+          braintree_subscription_id: null,
+          braintree_customer_id: null,
+          braintree_payment_method_token: null,
+          card_last4: null,
+          card_type: null,
+          status: 'pending',
+          activated_at: null,
+          ip_address,
+          user_agent,
+          payment_method_nonce: payment_method_nonce || null,
+          created_at: new Date().toISOString()
+        }, { onConflict: 'membership_id' });
       }
-    } catch(e){
-      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'customer_creation_error', error_message: e.message, plan_id });
-      return res.status(500).json({ error: 'customer_creation_error', message: e.message });
-    }
 
-    // Create payment method for customer
-    let paymentMethodToken = null;
-    let card_last4 = null;
-    let card_type = null;
-    let card_fingerprint = null;
-
-    try {
-      const pmRes = await gateway.paymentMethod.create({
-        customerId: customerId,
-        paymentMethodNonce: payment_method_nonce,
-        options: { verifyCard: true, makeDefault: true }
-      });
-
-      if (pmRes.success) {
-        paymentMethodToken = pmRes.paymentMethod.token;
-        card_last4 = pmRes.paymentMethod.last4 || null;
-        card_type = pmRes.paymentMethod.cardType || null;
-        card_fingerprint = pmRes.paymentMethod.uniqueNumberIdentifier || null;
-      } else {
-        await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'payment_method_creation_failed', error_message: pmRes.message, plan_id });
-        return res.status(400).json({ error: 'card_verification_failed', detail: pmRes.message });
-      }
-    } catch(e){
-      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'payment_method_error', error_message: e.message, plan_id });
-      return res.status(500).json({ error: 'payment_method_error', message: e.message });
-    }
-
-    const cardCheck = await checkAndRegisterCard({ card_fingerprint, card_last4, card_type, membership_id });
-
-    if (cardCheck.is_suspicious) {
-      await logFailedAttempt({ email, card_last4, ip_address, user_agent, failure_type: 'suspicious_card_blocked', error_message: `Card used in ${cardCheck.usage_count} accounts`, plan_id });
-      return res.status(403).json({ error: 'card_blocked', message: 'Esta tarjeta ha sido marcada como sospechosa.' });
-    }
-
-    let subscriptionId = null;
-    let amount_paid = null;
-    let transactionId = null;
-
-    try {
-      const subRes = await gateway.subscription.create({
-        paymentMethodToken: paymentMethodToken,
-        planId: plan_id
-      });
-
-      if (subRes.success) {
-        subscriptionId = subRes.subscription.id;
-        amount_paid = subRes.subscription.price || null;
-
-        if (subRes.subscription.transactions && subRes.subscription.transactions.length > 0) {
-          transactionId = subRes.subscription.transactions[0].id;
-        }
-
-        if (supabase) {
-          await supabase.from('memberships').insert({
-            membership_id,
-            email,
-            user_name: user_name || null,
-            plan_id,
-            plan_name: product_name || null,
-            amount_paid: amount_paid || null,
-            currency: 'USD',
-            braintree_subscription_id: subscriptionId,
-            braintree_customer_id: customerId,
-            braintree_payment_method_token: paymentMethodToken,
-            card_last4,
-            card_type,
-            status: WAIT_FOR_WEBHOOK ? 'pending' : 'active',
-            activated_at: WAIT_FOR_WEBHOOK ? null : new Date().toISOString(),
-            ip_address,
-            user_agent
-          });
-        }
-
-        if (supabase && transactionId) {
-          const tx = subRes.subscription.transactions[0];
-          await supabase.from('transactions').insert({
-            membership_id,
-            braintree_transaction_id: transactionId,
-            braintree_subscription_id: subscriptionId,
-            amount: tx.amount,
-            currency: tx.currencyIsoCode || 'USD',
-            status: tx.status,
-            plan_id,
-            card_last4,
-            card_type,
-            ip_address,
-            user_agent,
-            raw_data: tx
-          });
-        }
-
-        await logEvent(membership_id, 'subscription_created', { plan_id, subscription_id: subscriptionId });
-
-        if (WAIT_FOR_WEBHOOK) {
-          return res.json({ ok: true, message: 'subscription_created_waiting_webhook', subscription_id: subscriptionId, membership_id });
-        } else {
-          const result = await handleConfirmedPayment({ plan_id, email, membership_id, user_name });
-          return res.json({ ok: true, claim: result.claim, redirect: result.redirect });
-        }
-
-      } else {
-        const errorDetail = subRes.message || JSON.stringify(subRes);
-        await logFailedAttempt({ email, card_last4, ip_address, user_agent, failure_type: 'subscription_creation_failed', error_message: errorDetail, plan_id, amount: amount_paid });
-        return res.status(400).json({ error: 'subscription_failed', detail: errorDetail });
-      }
-    } catch(e){
-      await logFailedAttempt({ email, card_last4, ip_address, user_agent, failure_type: 'subscription_error', error_message: e.message, plan_id });
-      return res.status(500).json({ error: 'subscription_error', message: e.message });
+      await logEvent(membership_id || crypto.randomUUID(), 'subscription_requested', { plan_id, product_name, email });
+      // Respond immediately — the client should display "esperando confirmación" and wait for webhook/email
+      return res.json({ ok: true, message: 'created_pending_waiting_webhook', membership_id });
+    } catch (e) {
+      console.error('db insert error', e?.message || e);
+      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'db_error', error_message: e.message });
+      return res.status(500).json({ error: 'db_error', message: e.message });
     }
 
   } catch (e) {
@@ -488,18 +394,29 @@ app.post('/api/braintree/webhook', express.raw({ type: '*/*' }), async (req, res
           membership_id = data.membership_id;
           email = data.email;
           user_name = data.user_name;
+        } else {
+          // Fallback: try to match by stored pending membership that contains payment_method_nonce or other metadata
+          const { data: pend } = await supabase.from('memberships').select('membership_id, email, user_name').eq('payment_method_nonce', notification.subscription && notification.subscription.id ? notification.subscription.id : '').maybeSingle();
+          if (pend) {
+            membership_id = pend.membership_id;
+            email = pend.email;
+            user_name = pend.user_name;
+          }
         }
       }
 
       if (email && membership_id) {
         if (supabase) {
-          await supabase.from('memberships').update({ status: 'active', activated_at: new Date().toISOString() }).eq('membership_id', membership_id);
+          await supabase.from('memberships').update({ status: 'active', activated_at: new Date().toISOString(), braintree_subscription_id }).eq('membership_id', membership_id);
         }
 
         try {
           await handleConfirmedPayment({ plan_id: (plan_id || 'plan_unknown'), email, membership_id, user_name });
           await markWebhookProcessed(event_id);
         } catch(e){ console.error('handleConfirmedPayment error', e?.message || e); }
+      } else {
+        // Log that webhook couldn't be linked to a membership
+        await logEvent(event_id, 'unmatched_webhook', { kind: notification.kind, subscription: notification.subscription });
       }
     }
 
