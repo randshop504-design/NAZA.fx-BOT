@@ -82,6 +82,10 @@ const ROLE_ID_SENALES = process.env.ROLE_ID_SENALESDISCORD || null;
 const ROLE_ID_MENTORIA = process.env.ROLE_ID_MENTORIADISCORD || null;
 const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUALDISCORD || ROLE_ID_MENTORIA || null;
 
+// <<< MOD: DEFAULT CHANNEL (opcional) - si quieres que el bot envie mensaje en canal tras asignar rol
+const DEFAULT_CHANNEL_ID = process.env.DEFAULT_CHANNEL_ID || null;
+// <<< END MOD
+
 // Helpers
 function escapeHtml(s){ if(!s) return ''; return String(s).replace(/[&<>"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' })[c]); }
 
@@ -235,6 +239,24 @@ function roleForPlan(planId){
   if (planId === 'plan_anual') return ROLE_ID_ANUAL;
   return ROLE_ID_MENTORIA;
 }
+
+// <<< MOD: enviar mensaje al canal via Bot
+async function sendChannelMessage(channelId, message) {
+  if (!channelId || !DISCORD_BOT_TOKEN) return;
+  try {
+    await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ content: message })
+    });
+  } catch (err) {
+    console.error('sendChannelMessage err', err?.message || err);
+  }
+}
+// <<< END MOD
 
 // ============================================
 // ENDPOINT: Procesar Pago
@@ -411,7 +433,39 @@ app.post('/api/braintree/webhook', express.raw({ type: '*/*' }), async (req, res
         }
 
         try {
-          await handleConfirmedPayment({ plan_id: (plan_id || 'plan_unknown'), email, membership_id, user_name });
+          // Cuando el pago confirma: enviar email/claim y - NUEVO - intentar asignar rol directamente si ya tenemos mapping discord_id
+          const result = await handleConfirmedPayment({ plan_id: (plan_id || 'plan_unknown'), email, membership_id, user_name });
+          // <<< MOD: intentar asignar rol si ya existe membership_links.discord_id
+          try {
+            if (supabase) {
+              const { data: link } = await supabase.from('membership_links').select('discord_id').eq('membership_id', membership_id).maybeSingle();
+              const discordId = link?.discord_id || null;
+              if (discordId) {
+                const roleId = roleForPlan(plan_id);
+                if (roleId) {
+                  await addDiscordRole(discordId, roleId);
+                  await logEvent(membership_id, 'role_assigned_via_webhook', { discordId, roleId, plan_id });
+                } else {
+                  console.warn('No roleId resolved for plan', plan_id);
+                }
+
+                // Enviar mensaje de bienvenida al canal (si está configurado)
+                const channelId = DEFAULT_CHANNEL_ID;
+                if (channelId) {
+                  const msg = `Bienvenido <@${discordId}> — tu pago fue confirmado y el rol ha sido asignado. 🎉`;
+                  await sendChannelMessage(channelId, msg);
+                }
+              } else {
+                // Si no hay discordId, el email con claim seguirá permitiendo que el usuario haga OAuth y obtenga rol.
+                await logEvent(membership_id, 'no_discord_mapping', { membership_id, email });
+              }
+            }
+          } catch (errAssign) {
+            console.error('Error assigning role after webhook:', errAssign?.message || errAssign);
+            await logEvent(membership_id, 'role_assign_error', { error: errAssign?.message || String(errAssign) });
+          }
+          // <<< END MOD
+
           await markWebhookProcessed(event_id);
         } catch(e){ console.error('handleConfirmedPayment error', e?.message || e); }
       } else {
