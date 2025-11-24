@@ -54,8 +54,8 @@ if (!SENDGRID_API_KEY) {
 // BRAINTREE GATEWAY
 // ============================================
 const gateway = new braintree.BraintreeGateway({
-    environment: BRAINTREE_ENV === 'Production'
-        ? braintree.Environment.Production
+    environment: BRAINTREE_ENV === 'Production' 
+        ? braintree.Environment.Production 
         : braintree.Environment.Sandbox,
     merchantId: BRAINTREE_MERCHANT_ID,
     publicKey: BRAINTREE_PUBLIC_KEY,
@@ -128,8 +128,8 @@ function authenticateFrontend(req, res, next) {
 
     if (!token || token !== FRONTEND_TOKEN) {
         console.error('❌ Token inválido:', token);
-        return res.status(401).json({
-            success: false,
+        return res.status(401).json({ 
+            success: false, 
             message: 'unauthorized',
             error: 'Token inválido'
         });
@@ -147,11 +147,11 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     try {
         const { nonce, email, name, plan_id } = req.body;
 
-        console.log('📦 Datos recibidos:', {
+        console.log('📦 Datos recibidos:', { 
             nonce: nonce ? 'SÍ' : 'NO',
-            email,
-            name,
-            plan_id
+            email, 
+            name, 
+            plan_id 
         });
 
         if (!nonce || !email || !name || !plan_id) {
@@ -503,7 +503,6 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId) {
         const result = await sgMail.send(msg);
         console.log('✅ Email enviado a:', email, 'SendGrid result:', result?.[0]?.statusCode || 'unknown');
     } catch (error) {
-        // SendGrid puede devolver un error con response.body para detalles
         console.error('❌ Error enviando email con SendGrid:', error?.message || error);
         if (error?.response?.body) {
             console.error('SendGrid response body:', error.response.body);
