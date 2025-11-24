@@ -242,7 +242,7 @@ async function sendChannelMessage(channelId, message) {
 }
 
 // ============================================
-// NUEVO ENDPOINT: /api/frontend/confirm
+// ENDPOINT CORREGIDO: /api/frontend/confirm
 // ============================================
 app.post('/api/frontend/confirm', async (req, res) => {
   const ip_address = req.ip || req.connection.remoteAddress;
@@ -272,40 +272,43 @@ app.post('/api/frontend/confirm', async (req, res) => {
       return res.status(400).json({ error: 'missing_required_fields' });
     }
 
-    console.log('💳 Procesando pago con Braintree para:', email);
+    console.log('💳 Procesando pago frontend para:', email, '| Plan:', plan_id);
 
-    // Crear cliente en Braintree
-    const customerResult = await gateway.customer.create({
-      email,
-      firstName: user_name || 'Cliente',
-      paymentMethodNonce: payment_method_nonce
-    });
-
-    if (!customerResult.success) {
-      console.error('❌ Error creando cliente:', customerResult.message);
-      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'braintree_customer_error', error_message: customerResult.message });
-      return res.status(400).json({ error: 'customer_creation_failed', message: customerResult.message });
-    }
-
-    const customerId = customerResult.customer.id;
-    const paymentMethodToken = customerResult.customer.paymentMethods[0].token;
-
-    console.log('✅ Cliente creado:', customerId);
-
-    // Crear suscripción
+    // ✅ CORRECCIÓN: Crear suscripción directamente con el nonce
+    // Braintree creará el cliente automáticamente
     const subscriptionResult = await gateway.subscription.create({
-      paymentMethodToken,
+      paymentMethodNonce: payment_method_nonce,
       planId: plan_id
     });
 
     if (!subscriptionResult.success) {
       console.error('❌ Error creando suscripción:', subscriptionResult.message);
-      await logFailedAttempt({ email, ip_address, user_agent, failure_type: 'braintree_subscription_error', error_message: subscriptionResult.message });
-      return res.status(400).json({ error: 'subscription_creation_failed', message: subscriptionResult.message });
+      await logFailedAttempt({ 
+        email, 
+        ip_address, 
+        user_agent, 
+        failure_type: 'braintree_subscription_error', 
+        error_message: subscriptionResult.message 
+      });
+      return res.status(400).json({ 
+        error: 'subscription_creation_failed', 
+        message: subscriptionResult.message 
+      });
     }
 
-    const subscriptionId = subscriptionResult.subscription.id;
+    const subscription = subscriptionResult.subscription;
+    const subscriptionId = subscription.id;
+    const transactions = subscription.transactions || [];
+    const lastTransaction = transactions[0] || {};
+    
+    // Obtener datos del cliente y método de pago
+    const customerId = lastTransaction.customer?.id || null;
+    const paymentMethodToken = subscription.paymentMethodToken || null;
+    const card_last4 = lastTransaction.creditCard?.last4 || null;
+    const card_type = lastTransaction.creditCard?.cardType || null;
+
     console.log('✅ Suscripción creada:', subscriptionId);
+    console.log('👤 Cliente ID:', customerId);
 
     // Guardar en base de datos
     if (supabase) {
@@ -318,6 +321,8 @@ app.post('/api/frontend/confirm', async (req, res) => {
         braintree_subscription_id: subscriptionId,
         braintree_customer_id: customerId,
         braintree_payment_method_token: paymentMethodToken,
+        card_last4: card_last4,
+        card_type: card_type,
         status: 'active',
         activated_at: new Date().toISOString(),
         ip_address,
@@ -658,13 +663,14 @@ app.get('/discord/callback', async (req, res) => {
   }
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString(), version: '2.1' }));
+app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString(), version: '2.2' }));
 
 app.listen(PORT, () => {
-  console.log('🟢 NAZA.fx BOT v2.1 on', BASE_URL);
+  console.log('🟢 NAZA.fx BOT v2.2 - CORREGIDO on', BASE_URL);
   console.log('🛡️  Anti-fraud: ENABLED');
   console.log('⏳ WAIT_FOR_WEBHOOK:', WAIT_FOR_WEBHOOK);
   console.log('📊 Supabase:', supabase ? 'CONNECTED' : 'NOT CONFIGURED');
   console.log('💳 Braintree:', BT_ENV === braintree.Environment.Production ? 'PRODUCTION' : 'SANDBOX');
-  console.log('✅ Endpoint /api/frontend/confirm ACTIVO');
+  console.log('✅ Endpoint /api/frontend/confirm CORREGIDO');
+  console.log('🔧 FIX: Suscripción se crea directamente con nonce (sin cliente previo)');
 });
