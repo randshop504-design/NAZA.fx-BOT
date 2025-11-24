@@ -403,11 +403,14 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 // EMAIL: Templates y envíos (SendGrid)
 // Nota: sendWelcomeEmail ahora acepta un token opcional existingToken. Si se pasa, usa ese token
 // (evita crear un claim duplicado). Si no se pasa, crea el claim como antes.
-function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail }) {
-    return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>body{font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:0}.wrap{max-width:600px;margin:24px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.08)}.header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:28px;text-align:center}.content{padding:24px;color:#111}.btn{display:inline-block;background:#2d9bf0;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:600}.footer{padding:16px;text-align:center;color:#888;font-size:13px;background:#fafafa}.muted{color:#666;font-size:14px}</style></head><body><div class="wrap"><div class="header"><h1>🎉 ¡Bienvenido a NAZA Trading Academy!</h1></div><div class="content"><p>Hola <strong>${escapeHtml(name || 'usuario')}</strong>,</p><p>Tu suscripción <strong>${escapeHtml(planName)}</strong> ha sido activada correctamente.</p><p><strong>Detalles:</strong></p><ul><li>Plan: ${escapeHtml(planName)}</li><li>ID de suscripción: ${escapeHtml(subscriptionId)}</li><li>Email: ${escapeHtml(emailSafe(email))}</li></ul><p style="margin-top:16px">Para completar tu acceso a Discord y asociar tu cuenta, pulsa el siguiente botón:</p><p style="text-align:center;margin:20px 0"><a href="${claimUrl}" class="btn">Obtener acceso</a></p><p class="muted">El enlace funciona hasta que completes el registro en Discord. Si ya iniciaste sesión por OAuth2, no es necesario volver a usarlo.</p></div><div class="footer"><div>© ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: ${escapeHtml(supportEmail || FROM_EMAIL)}</div></div></div></body></html>`;
+
+// REEMPLAZADO: buildWelcomeEmailHtml ahora muestra el enlace en texto, añade data-token y el token para debug/copia
+function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
+    return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>body{font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:0}.wrap{max-width:600px;margin:24px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.08)}.header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:28px;text-align:center}.content{padding:24px;color:#111}.btn{display:inline-block;background:#2d9bf0;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:600}.footer{padding:16px;text-align:center;color:#888;font-size:13px;background:#fafafa}.muted{color:#666;font-size:14px}</style></head><body><div class="wrap"><div class="header"><h1>🎉 ¡Bienvenido a NAZA Trading Academy!</h1></div><div class="content"><p>Hola <strong>${escapeHtml(name || 'usuario')}</strong>,</p><p>Tu suscripción <strong>${escapeHtml(planName)}</strong> ha sido activada correctamente.</p><p><strong>Detalles:</strong></p><ul><li>Plan: ${escapeHtml(planName)}</li><li>ID de suscripción: ${escapeHtml(subscriptionId)}</li><li>Email: ${escapeHtml(emailSafe(email))}</li></ul><p style="margin-top:16px">Para completar tu acceso a Discord y asociar tu cuenta, pulsa el siguiente botón:</p><p style="text-align:center;margin:20px 0"><a href="${claimUrl}" data-token="${encodeURIComponent(token)}" class="btn">Obtener acceso</a></p><p style="margin-top:12px;font-size:13px;color:#666">Si el botón no funciona, copia y pega en tu navegador este enlace:<br/><a href="${claimUrl}">${claimUrl}</a></p><p style="margin-top:8px;font-size:12px;color:#999">Token (solo para debug/copia): ${encodeURIComponent(token)}</p><p class="muted">El enlace funciona hasta que completes el registro en Discord. Si ya iniciaste sesión por OAuth2, no es necesario volver a usarlo.</p></div><div class="footer"><div>© ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: ${escapeHtml(supportEmail || FROM_EMAIL)}</div></div></div></body></html>`;
 }
-function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail, email }) {
-    return `Hola ${name || 'usuario'},\n\nTu suscripción "${planName}" ha sido activada.\nID de suscripción: ${subscriptionId}\nEmail: ${email || ''}\n\nPara completar el acceso a Discord y asociar tu cuenta, visita:\n${claimUrl}\n\nNota: El enlace funciona hasta que completes el registro.\n\nSoporte: ${supportEmail || FROM_EMAIL}\n`;
+
+function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail, email, token }) {
+    return `Hola ${name || 'usuario'},\n\nTu suscripción "${planName}" ha sido activada.\nID de suscripción: ${subscriptionId}\nEmail: ${email || ''}\n\nPara completar el acceso a Discord y asociar tu cuenta, visita:\n${claimUrl}\n\nToken (copia): ${token}\n\nNota: El enlace funciona hasta que completes el registro.\n\nSoporte: ${supportEmail || FROM_EMAIL}\n`;
 }
 
 async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId, extra = {}, existingToken = null) {
@@ -438,12 +441,20 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
         });
     }
 
-    const claimUrl = `${BOT_URL.replace(/\/$/, '')}/api/auth/claim?token=${token}`;
-    const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL });
-    const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email });
+    // <-- CAMBIO: asegurar encodeURIComponent para el token en la URL
+    const claimUrl = `${BOT_URL.replace(/\/$/, '')}/api/auth/claim?token=${encodeURIComponent(token)}`;
+
+    // Pasar token al template HTML y al texto
+    const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL, token });
+    const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email, token });
 
     const msg = { to: email, from: FROM_EMAIL, subject: `¡Bienvenido a NAZA Trading Academy! — Obtener acceso`, text, html };
     try {
+        // <-- DEBUG LINES (ya añadidas por ti)
+        console.log('DEBUG sendWelcomeEmail -> token:', token);
+        console.log('DEBUG sendWelcomeEmail -> claimUrl:', claimUrl);
+        // <-- end debug lines
+
         const result = await sgMail.send(msg);
         console.log('✅ Email enviado a:', email, 'SendGrid result:', result?.[0]?.statusCode || 'unknown');
     } catch (error) {
