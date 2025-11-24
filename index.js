@@ -154,7 +154,6 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
             plan_id 
         });
 
-        // Validaciones
         if (!nonce || !email || !name || !plan_id) {
             return res.status(400).json({
                 success: false,
@@ -162,35 +161,38 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
             });
         }
 
-        // Validar email
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Email inválido'
-            });
-        }
-
-        // Usar el plan_id directamente (NO mapear)
-        console.log('💳 Creando suscripción en Braintree...');
-        console.log('   Plan ID (directo):', plan_id);
-
-        // Crear suscripción con el plan_id directo
-        const result = await gateway.subscription.create({
-            paymentMethodNonce: nonce,
-            planId: plan_id  // ← USAR DIRECTAMENTE
+        // Crear cliente con método de pago
+        const customerResult = await gateway.customer.create({
+            email: email,
+            paymentMethodNonce: nonce
         });
 
-        if (!result.success) {
-            console.error('❌ Error de Braintree:', result.message);
+        if (!customerResult.success) {
+            console.error('❌ Error creando cliente:', customerResult.message);
             return res.status(400).json({
                 success: false,
-                message: result.message
+                message: 'Error creando cliente: ' + customerResult.message
             });
         }
 
-        const subscriptionId = result.subscription.id;
-        const customerId = result.subscription.transactions[0].customer.id;
+        const paymentMethodToken = customerResult.customer.paymentMethods[0].token;
+
+        // Crear suscripción con paymentMethodToken
+        const subscriptionResult = await gateway.subscription.create({
+            paymentMethodToken: paymentMethodToken,
+            planId: plan_id
+        });
+
+        if (!subscriptionResult.success) {
+            console.error('❌ Error creando suscripción:', subscriptionResult.message);
+            return res.status(400).json({
+                success: false,
+                message: 'Error creando suscripción: ' + subscriptionResult.message
+            });
+        }
+
+        const subscriptionId = subscriptionResult.subscription.id;
+        const customerId = subscriptionResult.subscription.transactions[0].customer.id;
 
         console.log('✅ Suscripción creada:', subscriptionId);
         console.log('👤 Customer ID:', customerId);
@@ -532,9 +534,8 @@ app.get('/health', (req, res) => {
 // INICIAR SERVIDOR
 // ============================================
 app.listen(PORT, () => {
-    console.log('🚀 NAZA Bot v7.0 FINAL (Plan IDs directos)');
+    console.log('🚀 NAZA Bot v7.1 con creación correcta de cliente y suscripción');
     console.log('🌐 Puerto:', PORT);
     console.log('🔗 URL:', BASE_URL);
     console.log('✅ Listo para recibir pagos');
-    console.log('📋 Plan IDs: plan_mensual, plan_trimestral, plan_anual');
 });
