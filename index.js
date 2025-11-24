@@ -6,6 +6,7 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
+const fetch = global.fetch || require('node-fetch');
 
 const app = express();
 app.use(express.json());
@@ -83,8 +84,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
 });
 
 // ============================================
-// ALMACENAMIENTO TEMPORAL PARA OAUTH2 (FRONTEND FLOW) - REMOVED
-// const pendingAuths = new Map();
+// ALMACENAMIENTO TEMPORAL PARA OAUTH2 (FRONTEND FLOW)
+const pendingAuths = new Map();
 
 // ============================================
 // MAPEO DE PLANES A ROLES
@@ -172,8 +173,8 @@ app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
     // 3) Contar emails distintos asociados a esta tarjeta (memberships + claims)
     let cardUsageCount = 0;
     if (last4 && last4.toString().trim() !== '') {
-      // Intentamos usar una RPC si existe (opcional), si falla hacemos fallback a consultas separadas
       try {
+        // Preferir RPC si existe
         const { data: cardEmails, error: rpcErr } = await supabase.rpc('naza_get_card_emails', {
           in_last4: last4,
           in_card_expiry: card_expiry
@@ -185,71 +186,33 @@ app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
           cardUsageCount = setEmails.size;
         } else {
           // fallback: get distinct emails from memberships and claims
-          const { data: mEmails } = await supabase
-            .from('memberships')
-            .select('email')
-            .eq('last4', last4)
-            .eq('card_expiry', card_expiry);
+          const [{ data: mEmails, error: mErr }, { data: cEmails, error: cErr }] = await Promise.all([
+            supabase.from('memberships').select('email').eq('last4', last4).eq('card_expiry', card_expiry),
+            supabase.from('claims').select('email').eq('last4', last4).eq('card_expiry', card_expiry)
+          ]);
 
-          const { data: cEmails } = await supabase
-            .from('claims')
-            .select('email')
-            .eq('last4', last4)
-            .eq('card_expiry', card_expiry);
-
-          const setEmails = new Set();
-          (mEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
-          (cEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
-          setEmails.delete(''); // quitar vacíos
-          cardUsageCount = setEmails.size;
-        }
-      } catch (err) {
-        // fallback en caso de error inesperado
-        try {
-          const { data: mEmails } = await supabase
-            .from('memberships')
-            .select('email')
-            .eq('last4', last4)
-            .eq('card_expiry', card_expiry);
-
-          const { data: cEmails } = await supabase
-            .from('claims')
-            .select('email')
-            .eq('last4', last4)
-            .eq('card_expiry', card_expiry);
+          if (mErr) console.warn('mErr fallback:', mErr);
+          if (cErr) console.warn('cErr fallback:', cErr);
 
           const setEmails = new Set();
           (mEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
           (cEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
           setEmails.delete('');
           cardUsageCount = setEmails.size;
-        } catch (err2) {
-          console.error('Error contando card usage (validate-claim) fallback:', err2);
-          cardUsageCount = 0;
         }
+      } catch (err) {
+        console.error('Error contando card usage (validate-claim) fallback:', err);
+        cardUsageCount = 0;
       }
     }
 
     // 4) Regla: si cardUsageCount >= 2 y el email no está ya en ese set -> bloquear
     let cardBlocked = false;
     if (cardUsageCount >= 2 && last4 && last4.toString().trim() !== '') {
-      // comprobar si este email ya está en la lista (si no lo está, bloquear)
-      const { data: mHas } = await supabase
-        .from('memberships')
-        .select('id')
-        .eq('email', email)
-        .eq('last4', last4)
-        .eq('card_expiry', card_expiry)
-        .limit(1);
-
-      const { data: cHas } = await supabase
-        .from('claims')
-        .select('id')
-        .eq('email', email)
-        .eq('last4', last4)
-        .eq('card_expiry', card_expiry)
-        .limit(1);
-
+      const [{ data: mHas }, { data: cHas }] = await Promise.all([
+        supabase.from('memberships').select('id').eq('email', email).eq('last4', last4).eq('card_expiry', card_expiry).limit(1),
+        supabase.from('claims').select('id').eq('email', email).eq('last4', last4).eq('card_expiry', card_expiry).limit(1)
+      ]);
       const alreadyUsingThisCard = (Array.isArray(mHas) && mHas.length > 0) || (Array.isArray(cHas) && cHas.length > 0);
 
       if (!alreadyUsingThisCard) cardBlocked = true;
@@ -288,7 +251,6 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     email = (email || '').trim().toLowerCase();
 
     // DEBUG: Comprobación REST directa antes de usar supabase-js
-    // (imprime status y body para diagnosticar PGRST205)
     try {
         console.log('DEBUG: probando REST direct a /rest/v1/memberships');
         const restResp = await fetch(`${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/memberships?select=*&limit=1`, {
@@ -315,7 +277,6 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 
         if (memErr) {
             console.error('Error consultando memberships:', memErr);
-            // Mostrar info adicional si PGRST205
             if (memErr.code === 'PGRST205' || (memErr.message && memErr.message.includes('Could not find the table'))) {
                 console.error('ERROR DETECTADO: Parece que PostgREST no encuentra la tabla "memberships". Verifica SUPABASE_URL y la service_role key en el entorno.');
             }
@@ -332,7 +293,7 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     try {
         const { data: existingClaimsForEmail, error: claimErr } = await supabase
             .from('claims')
-            .select('id,used')
+            .select('id, used')
             .eq('email', email)
             .limit(1);
 
@@ -350,20 +311,57 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 
     // 3) Verificar uso de la tarjeta (no permitir >2 correos distintos)
     try {
-        const { data: cardRows, error: cardErr } = await supabase
-            .from('claims')
-            .select('email')
-            .eq('last4', last4 || '')
-            .eq('card_expiry', cardExpiry || '');
+        // obtener emails distintos tanto de memberships como de claims usando esa tarjeta
+        const [{ data: mRows, error: mErr }, { data: cRows, error: cErr }] = await Promise.all([
+            supabase.from('memberships').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || ''),
+            supabase.from('claims').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || '')
+        ]);
 
-        if (cardErr) {
-            console.error('Error consultando claims por tarjeta:', cardErr);
-            throw new Error('Error interno');
+        if (mErr) {
+            console.error('Error consultando memberships por tarjeta:', mErr);
+            // no abortar aún, continuamos con lo que tengamos
         }
-        const distinctEmails = new Set((cardRows || []).map(r => (r.email || '').toLowerCase()));
+        if (cErr) {
+            console.error('Error consultando claims por tarjeta:', cErr);
+        }
+
+        const distinctEmails = new Set();
+        (mRows || []).forEach(r => {
+            if (r.email) distinctEmails.add(String(r.email).toLowerCase());
+        });
+        (cRows || []).forEach(r => {
+            if (r.email) distinctEmails.add(String(r.email).toLowerCase());
+        });
+        distinctEmails.delete('');
+
         // Si ya hay 2 o más emails distintos usando esa tarjeta --> bloquear
         if (distinctEmails.size >= 2 && !distinctEmails.has(email)) {
             throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.');
+        }
+    } catch (err) {
+        throw err;
+    }
+
+    // 3b) (Recheck race-condition): asegurar que entre la verificación y el insert no apareció otro claim/membership
+    // Esto es una segunda verificación inmediata antes del insert.
+    try {
+        const [{ data: recheckMembership, error: rMemErr }, { data: recheckClaim, error: rClaimErr }] = await Promise.all([
+            supabase.from('memberships').select('id').eq('email', email).limit(1),
+            supabase.from('claims').select('id,used').eq('email', email).limit(1)
+        ]);
+        if (rMemErr) {
+            console.error('rMemErr:', rMemErr);
+            throw new Error('Error interno');
+        }
+        if (recheckMembership && recheckMembership.length > 0) {
+            throw new Error('Este correo ya está registrado');
+        }
+        if (rClaimErr) {
+            console.error('rClaimErr:', rClaimErr);
+            throw new Error('Error interno');
+        }
+        if (recheckClaim && recheckClaim.length > 0) {
+            throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
         }
     } catch (err) {
         throw err;
@@ -392,6 +390,7 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 
         if (insertErr) {
             console.error('Error insertando claim:', insertErr);
+            // En caso de conflicto por unique constraint en email o token, devolver mensaje amigable
             throw new Error('No se pudo crear el claim');
         }
         return token;
@@ -461,94 +460,6 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Faltan datos requeridos' });
         }
 
-        // Get payment method details from nonce to validate before charging
-        const paymentMethodNonceResult = await gateway.paymentMethodNonce.find(nonce);
-        if (!paymentMethodNonceResult.success) {
-            console.error('❌ Error obteniendo detalles del nonce:', paymentMethodNonceResult.message);
-            return res.status(400).json({ success: false, message: 'Invalid nonce' });
-        }
-        const last4 = paymentMethodNonceResult.paymentMethodNonce.last4 || '';
-        const cardExpiry = paymentMethodNonceResult.paymentMethodNonce.expirationDate || '';
-
-        // Validate before charging
-        const rawEmail = email;
-        const emailLower = String(rawEmail).trim().toLowerCase();
-
-        // 1) Check membership
-        const { data: membershipsRows, error: memErr } = await supabase
-            .from('memberships')
-            .select('id')
-            .eq('email', emailLower)
-            .limit(1);
-        if (memErr) {
-            console.error('Error consultando memberships:', memErr);
-            return res.status(500).json({ success: false, message: 'Error interno' });
-        }
-        const existsMembership = Array.isArray(membershipsRows) && membershipsRows.length > 0;
-
-        // 2) Check claim
-        const { data: claimRows, error: claimErr } = await supabase
-            .from('claims')
-            .select('id, used')
-            .eq('email', emailLower)
-            .limit(1);
-        if (claimErr) {
-            console.error('Error consultando claims:', claimErr);
-            return res.status(500).json({ success: false, message: 'Error interno' });
-        }
-        const existsClaim = Array.isArray(claimRows) && claimRows.length > 0;
-
-        // 3) Card usage count
-        let cardUsageCount = 0;
-        if (last4 && cardExpiry) {
-            try {
-                const { data: mEmails } = await supabase
-                    .from('memberships')
-                    .select('email')
-                    .eq('last4', last4)
-                    .eq('card_expiry', cardExpiry);
-                const { data: cEmails } = await supabase
-                    .from('claims')
-                    .select('email')
-                    .eq('last4', last4)
-                    .eq('card_expiry', cardExpiry);
-                const setEmails = new Set();
-                (mEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
-                (cEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
-                setEmails.delete('');
-                cardUsageCount = setEmails.size;
-            } catch (err) {
-                console.error('Error counting card usage:', err);
-                cardUsageCount = 0;
-            }
-        }
-
-        // 4) Check card blocked
-        let cardBlocked = false;
-        if (cardUsageCount >= 2 && last4 && cardExpiry) {
-            const { data: mHas } = await supabase
-                .from('memberships')
-                .select('id')
-                .eq('email', emailLower)
-                .eq('last4', last4)
-                .eq('card_expiry', cardExpiry)
-                .limit(1);
-            const { data: cHas } = await supabase
-                .from('claims')
-                .select('id')
-                .eq('email', emailLower)
-                .eq('last4', last4)
-                .eq('card_expiry', cardExpiry)
-                .limit(1);
-            const alreadyUsingThisCard = (Array.isArray(mHas) && mHas.length > 0) || (Array.isArray(cHas) && cHas.length > 0);
-            if (!alreadyUsingThisCard) cardBlocked = true;
-        }
-
-        if (existsMembership || existsClaim || cardBlocked) {
-            return res.status(400).json({ success: false, message: 'Validation failed: email or card not allowed' });
-        }
-
-        // Proceed with payment
         const customerResult = await gateway.customer.create({ email: email, paymentMethodNonce: nonce });
         if (!customerResult.success) {
             console.error('❌ Error creando cliente:', customerResult.message);
@@ -557,7 +468,8 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
 
         const paymentMethod = customerResult.customer.paymentMethods[0];
         const paymentMethodToken = paymentMethod.token;
-        // last4 and cardExpiry already obtained
+        const last4 = paymentMethod.last4 || '';
+        const cardExpiry = paymentMethod.expirationDate || ''; // formato MM/YYYY o MM/YY
 
         const subscriptionResult = await gateway.subscription.create({ paymentMethodToken: paymentMethodToken, planId: plan_id });
         if (!subscriptionResult.success) {
@@ -569,29 +481,23 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
         const customerId = customerResult.customer.id || null;
         console.log('✅ Suscripción creada:', subscriptionId, 'Customer ID:', customerId);
 
-        // Create claim and get token
-        const token = await createClaimToken({
-            email: emailLower,
+        // FRONTEND FLOW: generar state y guardar en memoria
+        const state = crypto.randomBytes(16).toString('hex');
+        pendingAuths.set(state, {
+            email,
             name,
             plan_id,
-            subscriptionId,
-            customerId,
-            last4,
-            cardExpiry: cardExpiry,
-            extra: { source: 'frontend_confirm' }
+            subscription_id: subscriptionId,
+            customer_id: customerId,
+            timestamp: Date.now()
         });
+        setTimeout(()=> pendingAuths.delete(state), 10 * 60 * 1000);
 
-        // OAuth URL with state = token
-        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${token}`;
+        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${state}`;
 
-        // Send email with claim URL
-        const claimUrl = `${BOT_URL.replace(/\/$/, '')}/api/auth/claim?token=${token}`;
-        const planNames = { 'plan_anual': 'Plan Anual 🔥', 'plan_trimestral': 'Plan Trimestral 📈', 'plan_mensual': 'Plan Mensual 💼' };
-        const planName = planNames[plan_id] || 'Plan';
-        const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email: emailLower, supportEmail: SUPPORT_EMAIL });
-        const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email: emailLower });
-        const msg = { to: emailLower, from: FROM_EMAIL, subject: `¡Bienvenido a NAZA Trading Academy! — Obtener acceso`, text, html };
-        sgMail.send(msg).catch(err => console.error('❌ Error sending email:', err));
+        // Enviar email con claim (email flow) en paralelo y pasar last4/cardExpiry
+        sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { last4, cardExpiry, source: 'frontend_confirm' })
+            .catch(err => console.error('❌ Error al enviar email (background):', err));
 
         return res.json({ success: true, subscription_id: subscriptionId, customer_id: customerId, oauth_url: oauthUrl, message: 'Suscripción creada. Recibirás un email con "Obtener acceso".' });
     } catch (error) {
@@ -643,7 +549,7 @@ app.get('/api/auth/claim', async (req, res) => {
 
 // ============================================
 // ENDPOINT: CALLBACK DE DISCORD OAUTH2
-// - Soporta state que sea token de claim (DB)
+// - Soporta state que sea token de claim (DB) o state de pendingAuths (memoria)
 // - Si es claim (DB), marcamos used=true SOLO después de registrar en memberships con éxito
 app.get('/discord/callback', async (req, res) => {
     console.log('📬 GET /discord/callback');
@@ -651,34 +557,38 @@ app.get('/discord/callback', async (req, res) => {
         const { code, state } = req.query;
         if (!code || !state) return res.status(400).send('❌ Faltan parámetros');
 
-        // Fetch claim data using state as token
-        const { data: claimsRows, error: claimErr } = await supabase
-            .from('claims')
-            .select('*')
-            .eq('token', state)
-            .limit(1);
+        // Intentar recuperar datos desde pendingAuths (frontend flow)
+        let authData = pendingAuths.get(state);
+        let claimData = null;
 
-        if (claimErr) {
-            console.error('Error leyendo claim de Supabase:', claimErr);
-            return res.status(500).send('Error interno');
-        }
-        if (!claimsRows || claimsRows.length === 0) {
-            return res.status(400).send('❌ Sesión expirada o inválida');
-        }
-        const claimData = claimsRows[0];
-        if (claimData.used) {
-            return res.status(400).send('Este enlace ya fue usado.');
+        if (!authData) {
+            // Buscar en claims por token = state
+            const { data: claimsRows, error: claimErr } = await supabase
+                .from('claims')
+                .select('*')
+                .eq('token', state)
+                .limit(1);
+
+            if (claimErr) {
+                console.error('Error leyendo claim de Supabase:', claimErr);
+            } else if (claimsRows && claimsRows.length > 0) {
+                claimData = claimsRows[0];
+                if (claimData.used) {
+                    return res.status(400).send('Este enlace ya fue usado.');
+                }
+                authData = {
+                    email: claimData.email,
+                    name: claimData.name,
+                    plan_id: claimData.plan_id,
+                    subscription_id: claimData.subscription_id,
+                    customer_id: claimData.customer_id,
+                    last4: claimData.last4,
+                    card_expiry: claimData.card_expiry
+                };
+            }
         }
 
-        const authData = {
-            email: claimData.email,
-            name: claimData.name,
-            plan_id: claimData.plan_id,
-            subscription_id: claimData.subscription_id,
-            customer_id: claimData.customer_id,
-            last4: claimData.last4,
-            card_expiry: claimData.card_expiry
-        };
+        if (!authData) return res.status(400).send('❌ Sesión expirada o inválida');
 
         console.log('📦 Datos para completar auth:', { email: authData.email, plan_id: authData.plan_id, subscription_id: authData.subscription_id });
 
@@ -762,20 +672,25 @@ app.get('/discord/callback', async (req, res) => {
             console.error('❌ Error con Supabase (memberships):', err);
         }
 
-        // Mark claim as used after successful registration
-        try {
-            const { error: markErr } = await supabase
-                .from('claims')
-                .update({ used: true, used_at: new Date().toISOString() })
-                .eq('token', state);
-            if (markErr) {
-                console.error('❌ Error marcando claim como usado:', markErr);
-            } else {
-                console.log('✅ Claim marcado como usado');
+        // Si venía de claim (DB), marcar used = true ahora que el registro fue completado
+        if (claimData) {
+            try {
+                const { error: markErr } = await supabase
+                    .from('claims')
+                    .update({ used: true, used_at: new Date().toISOString() })
+                    .eq('token', state);
+                if (markErr) {
+                    console.error('❌ Error marcando claim como usado:', markErr);
+                } else {
+                    console.log('✅ Claim marcado como usado');
+                }
+            } catch (err) {
+                console.error('❌ Error en update claim:', err);
             }
-        } catch (err) {
-            console.error('❌ Error en update claim:', err);
         }
+
+        // Si venía de pendingAuths, limpiamos
+        pendingAuths.delete(state);
 
         // Redirigir a frontend o mostrar página de éxito
         const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg/sXjU5ZVzXU';
