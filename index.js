@@ -2,7 +2,7 @@ const express = require('express');
 const braintree = require('braintree');
 const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
-const nodemailer = require('nodemailer');
+const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
 
 const app = express();
@@ -34,7 +34,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 
-const GMAIL_PASS = process.env.GMAIL_PASS;
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL;
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL;
 
@@ -42,11 +42,20 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
 // ============================================
+// CONFIGURAR SENDGRID
+// ============================================
+if (!SENDGRID_API_KEY) {
+    console.warn('⚠️ SENDGRID_API_KEY no definido. Los correos no podrán enviarse.');
+} else {
+    sgMail.setApiKey(SENDGRID_API_KEY);
+}
+
+// ============================================
 // BRAINTREE GATEWAY
 // ============================================
 const gateway = new braintree.BraintreeGateway({
-    environment: BRAINTREE_ENV === 'Production' 
-        ? braintree.Environment.Production 
+    environment: BRAINTREE_ENV === 'Production'
+        ? braintree.Environment.Production
         : braintree.Environment.Sandbox,
     merchantId: BRAINTREE_MERCHANT_ID,
     publicKey: BRAINTREE_PUBLIC_KEY,
@@ -66,24 +75,13 @@ const discordClient = new Client({
 discordClient.login(DISCORD_BOT_TOKEN);
 
 discordClient.once('ready', () => {
-    console.log('✅ Discord bot conectado:', discordClient.user.tag);
+    console.log('✅ Discord bot conectado:', discordClient.user?.tag || '(sin tag aún)');
 });
 
 // ============================================
 // SUPABASE CLIENT
 // ============================================
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
-
-// ============================================
-// NODEMAILER TRANSPORTER
-// ============================================
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: SUPPORT_EMAIL,
-        pass: GMAIL_PASS
-    }
-});
 
 // ============================================
 // ALMACENAMIENTO TEMPORAL PARA OAUTH2
@@ -130,8 +128,8 @@ function authenticateFrontend(req, res, next) {
 
     if (!token || token !== FRONTEND_TOKEN) {
         console.error('❌ Token inválido:', token);
-        return res.status(401).json({ 
-            success: false, 
+        return res.status(401).json({
+            success: false,
             message: 'unauthorized',
             error: 'Token inválido'
         });
@@ -149,11 +147,11 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     try {
         const { nonce, email, name, plan_id } = req.body;
 
-        console.log('📦 Datos recibidos:', { 
+        console.log('📦 Datos recibidos:', {
             nonce: nonce ? 'SÍ' : 'NO',
-            email, 
-            name, 
-            plan_id 
+            email,
+            name,
+            plan_id
         });
 
         if (!nonce || !email || !name || !plan_id) {
@@ -194,7 +192,8 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
         }
 
         const subscriptionId = subscriptionResult.subscription.id;
-        const customerId = subscriptionResult.subscription.transactions[0].customer.id;
+        // customer id may be available in subscription.transactions[0].customer if transaction exists
+        const customerId = (subscriptionResult.subscription.transactions && subscriptionResult.subscription.transactions[0] && subscriptionResult.subscription.transactions[0].customer && subscriptionResult.subscription.transactions[0].customer.id) || null;
 
         console.log('✅ Suscripción creada:', subscriptionId);
         console.log('👤 Customer ID:', customerId);
@@ -224,7 +223,7 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
 
         // Enviar email en paralelo (sin bloquear)
         sendWelcomeEmail(email, name, plan_id, subscriptionId).catch(err => {
-            console.error('❌ Error al enviar email:', err);
+            console.error('❌ Error al enviar email (en background):', err);
         });
 
         // Retornar respuesta al frontend
@@ -324,7 +323,7 @@ app.get('/discord/callback', async (req, res) => {
             });
             console.log('✅ Usuario agregado al servidor');
         } catch (err) {
-            console.log('ℹ️ Usuario ya está en el servidor');
+            console.log('ℹ️ Usuario ya está en el servidor o no pudo agregarse:', err?.message || err);
         }
 
         // Asignar rol
@@ -434,10 +433,10 @@ app.get('/discord/callback', async (req, res) => {
 });
 
 // ============================================
-// FUNCIÓN: ENVIAR EMAIL DE BIENVENIDA
+// FUNCIÓN: ENVIAR EMAIL DE BIENVENIDA (USANDO SENDGRID)
 // ============================================
 async function sendWelcomeEmail(email, name, planId, subscriptionId) {
-    console.log('📧 Enviando email de bienvenida...');
+    console.log('📧 Enviando email de bienvenida (SendGrid)...');
 
     const planNames = {
         'plan_anual': 'Plan Anual 🔥',
@@ -481,24 +480,34 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId) {
                 </div>
                 <div class="footer">
                     <p>© 2024 NAZA Trading Academy. Todos los derechos reservados.</p>
-                    <p>Soporte: ${SUPPORT_EMAIL}</p>
+                    <p>Soporte: ${SUPPORT_EMAIL || FROM_EMAIL || 'soporte'}</p>
                 </div>
             </div>
         </body>
         </html>
     `;
 
-    try {
-        await transporter.sendMail({
-            from: FROM_EMAIL,
-            to: email,
-            subject: `¡Bienvenido a NAZA Trading Academy! 🎉`,
-            html: htmlContent
-        });
+    if (!SENDGRID_API_KEY) {
+        console.error('❌ No hay SENDGRID_API_KEY configurada. Abortando envío de correo.');
+        throw new Error('SENDGRID_API_KEY no configurada');
+    }
 
-        console.log('✅ Email enviado a:', email);
+    const msg = {
+        to: email,
+        from: FROM_EMAIL, // Debe estar verificado en SendGrid
+        subject: `¡Bienvenido a NAZA Trading Academy! 🎉`,
+        html: htmlContent
+    };
+
+    try {
+        const result = await sgMail.send(msg);
+        console.log('✅ Email enviado a:', email, 'SendGrid result:', result?.[0]?.statusCode || 'unknown');
     } catch (error) {
-        console.error('❌ Error enviando email:', error);
+        // SendGrid puede devolver un error con response.body para detalles
+        console.error('❌ Error enviando email con SendGrid:', error?.message || error);
+        if (error?.response?.body) {
+            console.error('SendGrid response body:', error.response.body);
+        }
         throw error;
     }
 }
