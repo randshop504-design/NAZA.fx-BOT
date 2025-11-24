@@ -401,6 +401,8 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 
 // ============================================
 // EMAIL: Templates y envíos (SendGrid)
+// Nota: sendWelcomeEmail ahora acepta un token opcional existingToken. Si se pasa, usa ese token
+// (evita crear un claim duplicado). Si no se pasa, crea el claim como antes.
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail }) {
     return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>body{font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:0}.wrap{max-width:600px;margin:24px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.08)}.header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:28px;text-align:center}.content{padding:24px;color:#111}.btn{display:inline-block;background:#2d9bf0;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:600}.footer{padding:16px;text-align:center;color:#888;font-size:13px;background:#fafafa}.muted{color:#666;font-size:14px}</style></head><body><div class="wrap"><div class="header"><h1>🎉 ¡Bienvenido a NAZA Trading Academy!</h1></div><div class="content"><p>Hola <strong>${escapeHtml(name || 'usuario')}</strong>,</p><p>Tu suscripción <strong>${escapeHtml(planName)}</strong> ha sido activada correctamente.</p><p><strong>Detalles:</strong></p><ul><li>Plan: ${escapeHtml(planName)}</li><li>ID de suscripción: ${escapeHtml(subscriptionId)}</li><li>Email: ${escapeHtml(emailSafe(email))}</li></ul><p style="margin-top:16px">Para completar tu acceso a Discord y asociar tu cuenta, pulsa el siguiente botón:</p><p style="text-align:center;margin:20px 0"><a href="${claimUrl}" class="btn">Obtener acceso</a></p><p class="muted">El enlace funciona hasta que completes el registro en Discord. Si ya iniciaste sesión por OAuth2, no es necesario volver a usarlo.</p></div><div class="footer"><div>© ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: ${escapeHtml(supportEmail || FROM_EMAIL)}</div></div></div></body></html>`;
 }
@@ -408,7 +410,7 @@ function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEma
     return `Hola ${name || 'usuario'},\n\nTu suscripción "${planName}" ha sido activada.\nID de suscripción: ${subscriptionId}\nEmail: ${email || ''}\n\nPara completar el acceso a Discord y asociar tu cuenta, visita:\n${claimUrl}\n\nNota: El enlace funciona hasta que completes el registro.\n\nSoporte: ${supportEmail || FROM_EMAIL}\n`;
 }
 
-async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId, extra = {}) {
+async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId, extra = {}, existingToken = null) {
     console.log('📧 Enviando email de bienvenida (SendGrid)...');
     const planNames = { 'plan_anual': 'Plan Anual 🔥', 'plan_trimestral': 'Plan Trimestral 📈', 'plan_mensual': 'Plan Mensual 💼' };
     const planName = planNames[planId] || 'Plan';
@@ -421,16 +423,20 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
     const last4 = extra.last4 || '';
     const cardExpiry = extra.cardExpiry || '';
 
-    const token = await createClaimToken({
-        email,
-        name,
-        plan_id: planId,
-        subscriptionId,
-        customerId,
-        last4,
-        cardExpiry,
-        extra
-    });
+    // Si nos pasan existingToken, NO creamos uno nuevo (asumimos ya creado previamente)
+    let token = existingToken;
+    if (!token) {
+        token = await createClaimToken({
+            email,
+            name,
+            plan_id: planId,
+            subscriptionId,
+            customerId,
+            last4,
+            cardExpiry,
+            extra
+        });
+    }
 
     const claimUrl = `${BOT_URL.replace(/\/$/, '')}/api/auth/claim?token=${token}`;
     const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL });
@@ -450,7 +456,9 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 
 // ============================================
 // ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND (mantenido)
-// Extraemos last4 y expirationDate y los pasamos a sendWelcomeEmail
+// Ahora: generamos el claimToken con createClaimToken y lo usamos COMO state.
+// También guardamos los datos en pendingAuths usando el token como key.
+// De este modo el token que llega en el correo es el mismo que se usa como state para OAuth2.
 app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     console.log('📬 POST /api/frontend/confirm');
     try {
@@ -481,22 +489,37 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
         const customerId = customerResult.customer.id || null;
         console.log('✅ Suscripción creada:', subscriptionId, 'Customer ID:', customerId);
 
-        // FRONTEND FLOW: generar state y guardar en memoria
-        const state = crypto.randomBytes(16).toString('hex');
-        pendingAuths.set(state, {
+        // En lugar de crear un state aleatorio, creamos el claim token y lo usamos como state
+        const token = await createClaimToken({
+            email,
+            name,
+            plan_id,
+            subscriptionId,
+            customerId,
+            last4,
+            cardExpiry,
+            extra: { source: 'frontend_confirm' }
+        });
+
+        // Guardamos en pendingAuths usando el token como key para que /discord/callback lo reconozca
+        pendingAuths.set(token, {
             email,
             name,
             plan_id,
             subscription_id: subscriptionId,
             customer_id: customerId,
+            last4,
+            card_expiry: cardExpiry,
             timestamp: Date.now()
         });
-        setTimeout(()=> pendingAuths.delete(state), 10 * 60 * 1000);
+        // Mantener cleanup parecido
+        setTimeout(()=> pendingAuths.delete(token), 10 * 60 * 1000);
 
-        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${state}`;
+        // Construimos la URL de OAuth usando el token como state (igual que /api/auth/claim)
+        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${token}`;
 
-        // Enviar email con claim (email flow) en paralelo y pasar last4/cardExpiry
-        sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { last4, cardExpiry, source: 'frontend_confirm' })
+        // Enviar email con claim (usando el mismo token para evitar duplicados)
+        sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { last4, cardExpiry, source: 'frontend_confirm' }, token)
             .catch(err => console.error('❌ Error al enviar email (background):', err));
 
         return res.json({ success: true, subscription_id: subscriptionId, customer_id: customerId, oauth_url: oauthUrl, message: 'Suscripción creada. Recibirás un email con "Obtener acceso".' });
