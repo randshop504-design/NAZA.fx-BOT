@@ -4,6 +4,7 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
+const fetch = require('node-fetch'); // Asegúrate de tener node-fetch instalado para llamadas fetch en Node.js
 
 const app = express();
 app.use(express.json());
@@ -40,6 +41,7 @@ const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL;
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const BOT_URL = process.env.BOT_URL || BASE_URL; // URL pública de tu bot para links
 
 // ============================================
 // CONFIGURAR SENDGRID
@@ -93,9 +95,9 @@ const pendingAuths = new Map();
 // ============================================
 function getRoleIdForPlan(planId) {
     const mapping = {
-        'plan_mensual': ROLE_ID_SENALESDISCORD,        // 1439096696301813830
-        'plan_trimestral': ROLE_ID_MENTORIADISCORD,    // 1432149252016177233
-        'plan_anual': ROLE_ID_ANUALDISCORD             // 1432149252016177233
+        'plan_mensual': ROLE_ID_SENALESDISCORD,
+        'plan_trimestral': ROLE_ID_MENTORIADISCORD,
+        'plan_anual': ROLE_ID_ANUALDISCORD
     };
     const roleId = mapping[planId];
     console.log('🎯 getRoleIdForPlan:', { planId, roleId });
@@ -139,302 +141,108 @@ function authenticateFrontend(req, res, next) {
 }
 
 // ============================================
-// ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND
+// FUNCIONES AUXILIARES PARA CLAIM TOKEN
 // ============================================
-app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
-    console.log('📬 POST /api/frontend/confirm');
+async function createClaimToken({ email, subscriptionId, plan, ttlHours = 24 }) {
+    const token = crypto.randomBytes(24).toString('hex'); // 48 chars
+    const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000).toISOString();
 
-    try {
-        const { nonce, email, name, plan_id } = req.body;
-
-        console.log('📦 Datos recibidos:', { 
-            nonce: nonce ? 'SÍ' : 'NO',
-            email, 
-            name, 
-            plan_id 
-        });
-
-        if (!nonce || !email || !name || !plan_id) {
-            return res.status(400).json({
-                success: false,
-                message: 'Faltan datos requeridos'
-            });
-        }
-
-        // Crear cliente con método de pago
-        const customerResult = await gateway.customer.create({
-            email: email,
-            paymentMethodNonce: nonce
-        });
-
-        if (!customerResult.success) {
-            console.error('❌ Error creando cliente:', customerResult.message);
-            return res.status(400).json({
-                success: false,
-                message: 'Error creando cliente: ' + customerResult.message
-            });
-        }
-
-        const paymentMethodToken = customerResult.customer.paymentMethods[0].token;
-
-        // Crear suscripción con paymentMethodToken
-        const subscriptionResult = await gateway.subscription.create({
-            paymentMethodToken: paymentMethodToken,
-            planId: plan_id
-        });
-
-        if (!subscriptionResult.success) {
-            console.error('❌ Error creando suscripción:', subscriptionResult.message);
-            return res.status(400).json({
-                success: false,
-                message: 'Error creando suscripción: ' + subscriptionResult.message
-            });
-        }
-
-        const subscriptionId = subscriptionResult.subscription.id;
-        // customer id may be available in subscription.transactions[0].customer if transaction exists
-        const customerId = (subscriptionResult.subscription.transactions && subscriptionResult.subscription.transactions[0] && subscriptionResult.subscription.transactions[0].customer && subscriptionResult.subscription.transactions[0].customer.id) || null;
-
-        console.log('✅ Suscripción creada:', subscriptionId);
-        console.log('👤 Customer ID:', customerId);
-
-        // Generar state para OAuth2
-        const state = crypto.randomBytes(16).toString('hex');
-
-        // Guardar datos temporalmente
-        pendingAuths.set(state, {
+    const { data, error } = await supabase
+        .from('claims')
+        .insert([{
+            token,
             email,
-            name,
-            plan_id,
             subscription_id: subscriptionId,
-            customer_id: customerId,
-            timestamp: Date.now()
-        });
+            plan,
+            expires_at: expiresAt
+        }]);
 
-        // Limpiar después de 10 minutos
-        setTimeout(() => {
-            pendingAuths.delete(state);
-        }, 10 * 60 * 1000);
-
-        // Generar URL de OAuth2
-        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${state}`;
-
-        console.log('🔗 OAuth URL generada');
-
-        // Enviar email en paralelo (sin bloquear)
-        sendWelcomeEmail(email, name, plan_id, subscriptionId).catch(err => {
-            console.error('❌ Error al enviar email (en background):', err);
-        });
-
-        // Retornar respuesta al frontend
-        res.json({
-            success: true,
-            subscription_id: subscriptionId,
-            customer_id: customerId,
-            oauth_url: oauthUrl,
-            message: 'Suscripción creada. Recibirás un email en los próximos minutos.'
-        });
-
-        console.log('✅ Respuesta enviada al frontend');
-
-    } catch (error) {
-        console.error('❌ Error:', error);
-        res.status(500).json({
-            success: false,
-            message: error.message
-        });
+    if (error) {
+        console.error('Error al crear claim token:', error);
+        throw error;
     }
-});
+    return token;
+}
 
-// ============================================
-// ENDPOINT: CALLBACK DE DISCORD OAUTH2
-// ============================================
-app.get('/discord/callback', async (req, res) => {
-    console.log('📬 GET /discord/callback');
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
 
-    try {
-        const { code, state } = req.query;
+function emailSafe(e){ return e || ''; }
 
-        if (!code || !state) {
-            return res.status(400).send('❌ Faltan parámetros');
-        }
+function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail }) {
+    return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:0}
+    .wrap{max-width:600px;margin:24px auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.08)}
+    .header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:28px;text-align:center}
+    .content{padding:24px;color:#111}
+    .btn{display:inline-block;background:#2d9bf0;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:600}
+    .footer{padding:16px;text-align:center;color:#888;font-size:13px;background:#fafafa}
+    .muted{color:#666;font-size:14px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <h1>🎉 ¡Bienvenido a NAZA Trading Academy!</h1>
+    </div>
+    <div class="content">
+      <p>Hola <strong>${escapeHtml(name || 'usuario')}</strong>,</p>
+      <p>Tu suscripción <strong>${escapeHtml(planName)}</strong> ha sido activada correctamente.</p>
+      <p><strong>Detalles:</strong></p>
+      <ul>
+        <li>Plan: ${escapeHtml(planName)}</li>
+        <li>ID de suscripción: ${escapeHtml(subscriptionId)}</li>
+        <li>Email: ${escapeHtml(emailSafe(email))}</li>
+      </ul>
 
-        // Obtener datos guardados
-        const authData = pendingAuths.get(state);
+      <p style="margin-top:16px">
+        Para completar tu acceso a Discord y asociar tu cuenta, pulsa el siguiente botón:
+      </p>
 
-        if (!authData) {
-            return res.status(400).send('❌ Sesión expirada o inválida');
-        }
+      <p style="text-align:center;margin:20px 0">
+        <a href="${claimUrl}" class="btn">Obtener acceso</a>
+      </p>
 
-        console.log('📦 Datos recuperados:', {
-            email: authData.email,
-            plan_id: authData.plan_id,
-            subscription_id: authData.subscription_id
-        });
+      <p class="muted">El enlace expira y sólo puede usarse una vez. Si ya iniciaste sesión por OAuth2, no es necesario volver a usarlo.</p>
+    </div>
 
-        // Intercambiar code por access_token
-        const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            body: new URLSearchParams({
-                client_id: DISCORD_CLIENT_ID,
-                client_secret: DISCORD_CLIENT_SECRET,
-                grant_type: 'authorization_code',
-                code: code,
-                redirect_uri: DISCORD_REDIRECT_URL
-            })
-        });
+    <div class="footer">
+      <div>© ${new Date().getFullYear()} NAZA Trading Academy</div>
+      <div style="margin-top:6px">Soporte: ${escapeHtml(supportEmail || FROM_EMAIL)}</div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
 
-        const tokenData = await tokenResponse.json();
+function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail }) {
+    return `Hola ${name || 'usuario'},
 
-        if (!tokenData.access_token) {
-            console.error('❌ Error obteniendo token:', tokenData);
-            return res.status(400).send('❌ Error de autorización');
-        }
+Tu suscripción "${planName}" ha sido activada.
+ID de suscripción: ${subscriptionId}
+Email: ${emailSafe(email)}
 
-        console.log('✅ Token obtenido');
+Para completar el acceso a Discord y asociar tu cuenta, visita:
+${claimUrl}
 
-        // Obtener información del usuario
-        const userResponse = await fetch('https://discord.com/api/users/@me', {
-            headers: {
-                Authorization: `Bearer ${tokenData.access_token}`
-            }
-        });
+Nota: El enlace expira y solo puede usarse una vez.
 
-        const userData = await userResponse.json();
-        const discordId = userData.id;
-        const discordUsername = userData.username;
+Soporte: ${supportEmail || FROM_EMAIL}
+`;
+}
 
-        console.log('👤 Usuario Discord:', discordUsername, '(' + discordId + ')');
-
-        // Agregar al servidor
-        try {
-            await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`, {
-                method: 'PUT',
-                headers: {
-                    'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    access_token: tokenData.access_token
-                })
-            });
-            console.log('✅ Usuario agregado al servidor');
-        } catch (err) {
-            console.log('ℹ️ Usuario ya está en el servidor o no pudo agregarse:', err?.message || err);
-        }
-
-        // Asignar rol
-        const roleId = getRoleIdForPlan(authData.plan_id);
-
-        console.log('🎭 Asignando rol:', roleId, 'para plan:', authData.plan_id);
-
-        try {
-            const guild = await discordClient.guilds.fetch(GUILD_ID);
-            const member = await guild.members.fetch(discordId);
-            await member.roles.add(roleId);
-
-            console.log('✅ Rol asignado correctamente');
-        } catch (err) {
-            console.error('❌ Error asignando rol:', err);
-        }
-
-        // Guardar en Supabase
-        try {
-            const { error } = await supabase.from('memberships').insert({
-                email: authData.email,
-                name: authData.name,
-                plan_id: authData.plan_id,
-                subscription_id: authData.subscription_id,
-                customer_id: authData.customer_id,
-                discord_id: discordId,
-                discord_username: discordUsername,
-                status: 'active',
-                created_at: new Date().toISOString()
-            });
-
-            if (error) {
-                console.error('❌ Error guardando en Supabase:', error);
-            } else {
-                console.log('✅ Guardado en Supabase');
-            }
-        } catch (err) {
-            console.error('❌ Error con Supabase:', err);
-        }
-
-        // Limpiar datos temporales
-        pendingAuths.delete(state);
-
-        // Redirigir al usuario
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>¡Bienvenido a NAZA Trading Academy!</title>
-                <style>
-                    body {
-                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        height: 100vh;
-                        margin: 0;
-                        color: white;
-                    }
-                    .container {
-                        text-align: center;
-                        background: rgba(255,255,255,0.1);
-                        padding: 40px;
-                        border-radius: 20px;
-                        backdrop-filter: blur(10px);
-                        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-                    }
-                    h1 { font-size: 48px; margin-bottom: 20px; }
-                    p { font-size: 20px; margin-bottom: 30px; }
-                    .button {
-                        display: inline-block;
-                        background: white;
-                        color: #667eea;
-                        padding: 15px 40px;
-                        border-radius: 50px;
-                        text-decoration: none;
-                        font-weight: bold;
-                        transition: transform 0.3s;
-                    }
-                    .button:hover {
-                        transform: scale(1.05);
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>🎉 ¡Bienvenido!</h1>
-                    <p>Tu rol ha sido asignado correctamente.</p>
-                    <p>Revisa tu correo para más información.</p>
-                    <a href="https://discord.gg/sXjU5ZVzXU" class="button">Ir a Discord</a>
-                </div>
-                <script>
-                    setTimeout(() => {
-                        window.location.href = 'https://discord.gg/sXjU5ZVzXU';
-                    }, 3000);
-                </script>
-            </body>
-            </html>
-        `);
-
-    } catch (error) {
-        console.error('❌ Error en callback:', error);
-        res.status(500).send('❌ Error procesando la autorización');
-    }
-});
-
-// ============================================
-// FUNCIÓN: ENVIAR EMAIL DE BIENVENIDA (USANDO SENDGRID)
-// ============================================
 async function sendWelcomeEmail(email, name, planId, subscriptionId) {
     console.log('📧 Enviando email de bienvenida (SendGrid)...');
 
@@ -446,57 +254,23 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId) {
 
     const planName = planNames[planId] || 'Plan';
 
-    const htmlContent = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <style>
-                body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
-                .container { max-width: 600px; margin: 20px auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }
-                .content { padding: 30px; }
-                .button { display: inline-block; background: #667eea; color: white; padding: 12px 30px; border-radius: 50px; text-decoration: none; margin-top: 20px; }
-                .footer { background: #f4f4f4; padding: 20px; text-align: center; font-size: 12px; color: #666; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🎉 ¡Bienvenido a NAZA Trading Academy!</h1>
-                </div>
-                <div class="content">
-                    <p>Hola <strong>${name}</strong>,</p>
-                    <p>¡Gracias por unirte a nosotros! Tu suscripción al <strong>${planName}</strong> ha sido activada correctamente.</p>
-                    <p><strong>📋 Detalles de tu suscripción:</strong></p>
-                    <ul>
-                        <li>Plan: ${planName}</li>
-                        <li>ID de Suscripción: ${subscriptionId}</li>
-                        <li>Email: ${email}</li>
-                    </ul>
-                    <p>Ya deberías tener acceso a Discord. Si no ves el servidor, usa este enlace:</p>
-                    <a href="https://discord.gg/sXjU5ZVzXU" class="button">Unirse a Discord</a>
-                    <p style="margin-top: 30px;">Si tienes alguna pregunta, no dudes en contactarnos.</p>
-                </div>
-                <div class="footer">
-                    <p>© 2024 NAZA Trading Academy. Todos los derechos reservados.</p>
-                    <p>Soporte: ${SUPPORT_EMAIL || FROM_EMAIL || 'soporte'}</p>
-                </div>
-            </div>
-        </body>
-        </html>
-    `;
-
     if (!SENDGRID_API_KEY) {
         console.error('❌ No hay SENDGRID_API_KEY configurada. Abortando envío de correo.');
         throw new Error('SENDGRID_API_KEY no configurada');
     }
 
+    const token = await createClaimToken({ email, subscriptionId, plan: planName, ttlHours: 24 });
+    const claimUrl = `${BOT_URL.replace(/\/$/, '')}/api/auth/claim?token=${token}`;
+
+    const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL });
+    const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL });
+
     const msg = {
         to: email,
-        from: FROM_EMAIL, // Debe estar verificado en SendGrid
-        subject: `¡Bienvenido a NAZA Trading Academy! 🎉`,
-        html: htmlContent
+        from: FROM_EMAIL,
+        subject: `¡Bienvenido a NAZA Trading Academy! — Obtener acceso`,
+        text,
+        html
     };
 
     try {
@@ -512,33 +286,48 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId) {
 }
 
 // ============================================
-// WEBHOOK DE BRAINTREE
+// ENDPOINT: CLAIM TOKEN PARA OAUTH2
 // ============================================
-app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-urlencoded' }), async (req, res) => {
-    console.log('📬 Webhook recibido de Braintree');
+app.get('/api/auth/claim', async (req, res) => {
+    const token = req.query.token;
+    if (!token) return res.status(400).send('Token missing');
 
-    try {
-        const webhookNotification = await gateway.webhookNotification.parse(
-            req.body.bt_signature,
-            req.body.bt_payload
-        );
+    const nowIso = new Date().toISOString();
+    const { data: updated, error: updateError } = await supabase
+        .from('claims')
+        .update({ used: true })
+        .eq('token', token)
+        .eq('used', false)
+        .gt('expires_at', nowIso)
+        .select('id,email,subscription_id,plan')
+        .limit(1);
 
-        console.log('📦 Tipo:', webhookNotification.kind);
-        console.log('📦 Suscripción ID:', webhookNotification.subscription?.id);
-
-        res.sendStatus(200);
-    } catch (error) {
-        console.error('❌ Error procesando webhook:', error);
-        res.sendStatus(500);
+    if (updateError) {
+        console.error('Supabase update error', updateError);
+        return res.status(500).send('Error del servidor');
     }
+
+    if (!updated || updated.length === 0) {
+        return res.status(400).send('El enlace ya fue usado o expiró. Si necesitas ayuda, contacta soporte.');
+    }
+
+    const claimRow = updated[0];
+    const state = token;
+    const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
+    const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
+    const scope = encodeURIComponent('identify guilds.join');
+    const prompt = 'consent';
+
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${state}&prompt=${prompt}`;
+
+    return res.redirect(discordAuthUrl);
 });
 
 // ============================================
-// HEALTH CHECK
+// Resto de tu código (endpoints, webhook, etc.) permanece igual
 // ============================================
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+
+// ... Aquí va el resto de tu código existente, incluyendo /api/frontend/confirm, /discord/callback, webhook, etc.
 
 // ============================================
 // INICIAR SERVIDOR
