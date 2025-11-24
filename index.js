@@ -441,8 +441,8 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
         });
     }
 
-    // <-- CAMBIO: asegurar encodeURIComponent para el token en la URL
-    const claimUrl = `${BOT_URL.replace(/\/$/, '')}/api/auth/claim?token=${encodeURIComponent(token)}`;
+    // <-- CAMBIO: OAuth2 DIRECTO (el botón del correo irá directamente al OAuth2 de Discord)
+    const claimUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)}`;
 
     // Pasar token al template HTML y al texto
     const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL, token });
@@ -772,3 +772,5 @@ app.listen(PORT, () => {
     console.log('🌐 Puerto:', PORT);
     console.log('🔗 URL:', BASE_URL);
 });
+
+
