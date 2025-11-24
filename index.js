@@ -72,7 +72,15 @@ discordClient.once('ready', () => {
 
 // ============================================
 // SUPABASE CLIENT
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
+// Añado headers globales para asegurar que use la service_role key en las llamadas
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
+    global: {
+        headers: {
+            Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+            apikey: SUPABASE_SERVICE_ROLE
+        }
+    }
+});
 
 // ============================================
 // ALMACENAMIENTO TEMPORAL PARA OAUTH2 (FRONTEND FLOW)
@@ -132,6 +140,24 @@ function emailSafe(e){ return e || ''; }
 async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra = {} }) {
     email = (email || '').trim().toLowerCase();
 
+    // DEBUG: Comprobación REST directa antes de usar supabase-js
+    // (imprime status y body para diagnosticar PGRST205)
+    try {
+        console.log('DEBUG: probando REST direct a /rest/v1/memberships');
+        const restResp = await fetch(`${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/memberships?select=*&limit=1`, {
+            headers: {
+                apikey: SUPABASE_SERVICE_ROLE,
+                Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+                Accept: 'application/json'
+            }
+        });
+        console.log('DEBUG rest status:', restResp.status);
+        const restText = await restResp.text();
+        console.log('DEBUG rest body:', restText.substring(0, 2000)); // recorta por seguridad
+    } catch (dbgErr) {
+        console.error('DEBUG rest fetch error:', dbgErr);
+    }
+
     // 1) Verificar si ya existe una membresía (memberships) con ese email
     try {
         const { data: existingMembership, error: memErr } = await supabase
@@ -142,6 +168,10 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 
         if (memErr) {
             console.error('Error consultando memberships:', memErr);
+            // Mostrar info adicional si PGRST205
+            if (memErr.code === 'PGRST205' || (memErr.message && memErr.message.includes('Could not find the table'))) {
+                console.error('ERROR DETECTADO: Parece que PostgREST no encuentra la tabla "memberships". Verifica SUPABASE_URL y la service_role key en el entorno.');
+            }
             throw new Error('Error interno');
         }
         if (existingMembership && existingMembership.length > 0) {
