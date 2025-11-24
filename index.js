@@ -99,7 +99,9 @@ function getRoleIdForPlan(planId) {
         'plan_trimestral': ROLE_ID_MENTORIADISCORD,    // 1432149252016177233
         'plan_anual': ROLE_ID_ANUALDISCORD             // 1432149252016177233
     };
-    return mapping[planId] || ROLE_ID_SENALESDISCORD;
+    const roleId = mapping[planId];
+    console.log('🎯 getRoleIdForPlan:', { planId, roleId });
+    return roleId || ROLE_ID_SENALESDISCORD;
 }
 
 // ============================================
