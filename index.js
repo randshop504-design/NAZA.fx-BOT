@@ -133,6 +133,153 @@ function escapeHtml(str) {
 function emailSafe(e){ return e || ''; }
 
 // ============================================
+// ENDPOINT: Verificar si se puede crear un claim / validar email y tarjeta
+// Protegido por authenticateFrontend (usa x-frontend-token)
+app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
+  try {
+    const { email: rawEmail, last4 = '', card_expiry = '' } = req.body || {};
+    if (!rawEmail) return res.status(400).json({ success: false, message: 'email requerido' });
+
+    const email = String(rawEmail).trim().toLowerCase();
+
+    // 1) ¿Existe membership con ese email?
+    const { data: membershipsRows, error: memErr } = await supabase
+      .from('memberships')
+      .select('id')
+      .eq('email', email)
+      .limit(1);
+
+    if (memErr) {
+      console.error('Error consultando memberships (validate-claim):', memErr);
+      return res.status(500).json({ success: false, message: 'Error interno' });
+    }
+    const existsMembership = Array.isArray(membershipsRows) && membershipsRows.length > 0;
+
+    // 2) ¿Existe claim (no necesariamente usado) para ese email?
+    const { data: claimRows, error: claimErr } = await supabase
+      .from('claims')
+      .select('id, used')
+      .eq('email', email)
+      .limit(1);
+
+    if (claimErr) {
+      console.error('Error consultando claims (validate-claim):', claimErr);
+      return res.status(500).json({ success: false, message: 'Error interno' });
+    }
+    const existsClaim = Array.isArray(claimRows) && claimRows.length > 0;
+    const existingClaimUsed = existsClaim ? !!claimRows[0].used : false;
+
+    // 3) Contar emails distintos asociados a esta tarjeta (memberships + claims)
+    let cardUsageCount = 0;
+    if (last4 && last4.toString().trim() !== '') {
+      // Intentamos usar una RPC si existe (opcional), si falla hacemos fallback a consultas separadas
+      try {
+        const { data: cardEmails, error: rpcErr } = await supabase.rpc('naza_get_card_emails', {
+          in_last4: last4,
+          in_card_expiry: card_expiry
+        });
+
+        if (!rpcErr && Array.isArray(cardEmails)) {
+          const setEmails = new Set((cardEmails || []).map(r => (r.email || '').toLowerCase()));
+          setEmails.delete('');
+          cardUsageCount = setEmails.size;
+        } else {
+          // fallback: get distinct emails from memberships and claims
+          const { data: mEmails } = await supabase
+            .from('memberships')
+            .select('email')
+            .eq('last4', last4)
+            .eq('card_expiry', card_expiry);
+
+          const { data: cEmails } = await supabase
+            .from('claims')
+            .select('email')
+            .eq('last4', last4)
+            .eq('card_expiry', card_expiry);
+
+          const setEmails = new Set();
+          (mEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
+          (cEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
+          setEmails.delete(''); // quitar vacíos
+          cardUsageCount = setEmails.size;
+        }
+      } catch (err) {
+        // fallback en caso de error inesperado
+        try {
+          const { data: mEmails } = await supabase
+            .from('memberships')
+            .select('email')
+            .eq('last4', last4)
+            .eq('card_expiry', card_expiry);
+
+          const { data: cEmails } = await supabase
+            .from('claims')
+            .select('email')
+            .eq('last4', last4)
+            .eq('card_expiry', card_expiry);
+
+          const setEmails = new Set();
+          (mEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
+          (cEmails || []).forEach(r => setEmails.add((r.email || '').toLowerCase()));
+          setEmails.delete('');
+          cardUsageCount = setEmails.size;
+        } catch (err2) {
+          console.error('Error contando card usage (validate-claim) fallback:', err2);
+          cardUsageCount = 0;
+        }
+      }
+    }
+
+    // 4) Regla: si cardUsageCount >= 2 y el email no está ya en ese set -> bloquear
+    let cardBlocked = false;
+    if (cardUsageCount >= 2 && last4 && last4.toString().trim() !== '') {
+      // comprobar si este email ya está en la lista (si no lo está, bloquear)
+      const { data: mHas } = await supabase
+        .from('memberships')
+        .select('id')
+        .eq('email', email)
+        .eq('last4', last4)
+        .eq('card_expiry', card_expiry)
+        .limit(1);
+
+      const { data: cHas } = await supabase
+        .from('claims')
+        .select('id')
+        .eq('email', email)
+        .eq('last4', last4)
+        .eq('card_expiry', card_expiry)
+        .limit(1);
+
+      const alreadyUsingThisCard = (Array.isArray(mHas) && mHas.length > 0) || (Array.isArray(cHas) && cHas.length > 0);
+
+      if (!alreadyUsingThisCard) cardBlocked = true;
+    }
+
+    // 5) Construir respuesta con razones
+    const allowed = !existsMembership && !existsClaim && !cardBlocked;
+    const reasons = [];
+    if (existsMembership) reasons.push('email_already_registered');
+    if (existsClaim) reasons.push(existingClaimUsed ? 'claim_already_used_or_exists' : 'claim_already_exists');
+    if (cardBlocked) reasons.push('card_usage_limit_exceeded');
+
+    return res.json({
+      success: true,
+      allowed,
+      reasons,
+      details: {
+        existsMembership,
+        existsClaim,
+        existingClaimUsed,
+        cardUsageCount
+      }
+    });
+  } catch (err) {
+    console.error('❌ Error en /api/validate-claim:', err);
+    return res.status(500).json({ success: false, message: 'Error interno' });
+  }
+});
+
+// ============================================
 // FUNCIONES AUX: createClaimToken con validaciones requeridas
 // - No crear claim si ya existe membership con email
 // - No crear si ya hay claim pendiente para ese email
