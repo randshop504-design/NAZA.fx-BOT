@@ -88,7 +88,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
 const pendingAuths = new Map();
 
 // ============================================
-// MAPEo DE PLANES A ROLES
+// MAPEO DE PLANES A ROLES
 function getRoleIdForPlan(planId) {
     const mapping = {
         'plan_mensual': ROLE_ID_SENALESDISCORD,
@@ -404,10 +404,10 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 // Nota: sendWelcomeEmail ahora acepta un token opcional existingToken. Si se pasa, usa ese token
 // (evita crear un claim duplicado). Si no se pasa, crea el claim como antes.
 
-// REEMPLAZADO: buildWelcomeEmailHtml ahora muestra el enlace en texto, añade data-token y el token para debug/copia
+// RESTAURADA: buildWelcomeEmailHtml (versión estable anterior que funcionaba)
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
-    // Logo hosted (user requested local path) - keeping as provided local path
-    const logoPath = '/mnt/data/f6f4f46a-6304-447c-b8a8-c2270267fafc.png';
+    // Logo hosted (user requested URL) and styled to be circular + zoomed
+    const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
 
     return `<!doctype html>
 <html>
@@ -415,26 +415,22 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <style>
-    /* Mantengo el fondo oscuro espacial; subo contraste de textos (TODOs: todos los textos, excepto el botón) */
-    body{font-family:Arial,sans-serif;background:#0b0f14;margin:0;padding:0;color:#e8f1ff}
-    .wrap{max-width:680px;margin:24px auto;background:linear-gradient(180deg, rgba(2,6,23,0.95), rgba(8,12,18,0.94));border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.02)}
+    body{font-family:Arial,sans-serif;background:#0b0f14;margin:0;padding:0;color:#e6eef8}
+    .wrap{max-width:680px;margin:24px auto;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03)}
     .header{padding:28px 24px 8px 24px;text-align:center}
     .logo-container{width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a)}
     .logo{width:100%;height:100%;object-fit:cover;transform:scale(1.12);display:block}
     h1{color:#ff9b3b;margin:18px 0 8px 0;font-size:26px}
-    .sub{color:#d2e6ff;margin:6px 0 20px 0;font-size:16px}
-    .content{padding:20px 28px 28px 28px;color:#e8f1ff;line-height:1.5}
+    .sub{color:#cbd5e1;margin:6px 0 20px 0;font-size:16px}
+    .content{padding:20px 28px 28px 28px;color:#d6e6f8;line-height:1.5}
     .lead{font-size:15px;margin-bottom:16px}
-    .panel{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:18px;color:#e8f1ff}
+    .panel{background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:18px}
     .btn{display:inline-block;background:#2d9bf0;color:#fff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(45,155,240,0.15)}
-    .muted{color:#c2d8f6;font-size:13px;margin-top:8px}
+    .muted{color:#9fb0c9;font-size:13px;margin-top:8px}
     .site-link{display:block;background:rgba(255,255,255,0.02);padding:14px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02)}
     .small-cta{display:inline-block;padding:10px 16px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);margin-right:12px;text-decoration:none;color:#d6e6f8;font-weight:600;background:transparent}
-    .footer{padding:18px;text-align:center;color:#9fb0c9;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02)}
-    .details{font-size:13px;color:#d6e6f8;margin-top:12px}
-    /* Aseguro que los links en texto también tengan buen contraste */
-    a{color:#bfe0ff}
-    /* No tocar estilos del botón (.btn) para mantenerlo igual */
+    .footer{padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02)}
+    .details{font-size:13px;color:#9fb0c9;margin-top:12px}
   </style>
 </head>
 <body>
@@ -450,7 +446,7 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 
       <div class="panel">
         <p style="margin:0 0 10px 0;"><strong>Entrega del servicio</strong></p>
-        <p style="margin:0;color:inherit">Todos los privilegios de tu plan —cursos, clases en vivo, análisis exclusivos y canales privados— se gestionan dentro de <strong>Discord</strong>. Al pulsar <em>Obtener acceso</em> recibirás el rol correspondiente y se te desbloquearán automáticamente los canales de tu plan.</p>
+        <p style="margin:0;color:#d6e6f8">Todos los privilegios de tu plan —cursos, clases en vivo, análisis exclusivos y canales privados— se gestionan dentro de <strong>Discord</strong>. Al pulsar <em>Obtener acceso</em> recibirás el rol correspondiente y se te desbloquearán automáticamente los canales de tu plan.</p>
       </div>
 
       <div style="text-align:center;margin:22px 0;">
@@ -460,13 +456,13 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 
       <div class="panel">
         <p style="margin:0 0 8px 0;"><strong>Únete a la comunidad y mantente al día</strong></p>
-        <p style="margin:0 0 12px 0;color:inherit">Para ver anuncios oficiales, horarios de clases, avisos de sesiones en vivo y formar parte de los chats (WhatsApp y Telegram), visita nuestro sitio y sigue las instrucciones para unirte a los grupos desde allí.</p>
+        <p style="margin:0 0 12px 0;color:#d6e6f8">Para ver anuncios oficiales, horarios de clases, avisos de sesiones en vivo y formar parte de los chats (WhatsApp y Telegram), visita nuestro sitio y sigue las instrucciones para unirte a los grupos desde allí.</p>
         <a class="site-link" href="https://nazatradingacademy.com" target="_blank">https://nazatradingacademy.com</a>
       </div>
 
       <div class="panel" style="margin-top:18px;">
         <p style="margin:0 0 8px 0;"><strong>¿Nuevo en Discord o no tienes cuenta?</strong></p>
-        <p style="margin:0 0 12px 0;color:inherit">Si necesitas ayuda, usa los enlaces de abajo:</p>
+        <p style="margin:0 0 12px 0;color:#d6e6f8">Si necesitas ayuda, usa los enlaces de abajo:</p>
         <a class="small-cta" href="https://discord.com/download" target="_blank">Descargar Discord</a>
         <a class="small-cta" href="https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr" target="_blank">Cómo crear una cuenta (ES)</a>
       </div>
@@ -476,7 +472,7 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
         <div>Plan: ${escapeHtml(planName)}</div>
         <div>ID de suscripción: ${escapeHtml(subscriptionId || '')}</div>
         <div>Email: ${escapeHtml(emailSafe(email) || '')}</div>
-        <div style="margin-top:6px;font-size:12px;color:#9fb0c9">El enlace es de un solo uso y funciona hasta que completes el registro en Discord. Si ya iniciaste sesión con OAuth2, no es necesario volver a usarlo.</div>
+        <div style="margin-top:6px;font-size:12px;color:#8fa6bf">El enlace es de un solo uso y funciona hasta que completes el registro en Discord. Si ya iniciaste sesión con OAuth2, no es necesario volver a usarlo.</div>
       </div>
     </div>
 
@@ -722,7 +718,7 @@ app.get('/discord/callback', async (req, res) => {
                     plan_id: claimData.plan_id,
                     subscription_id: claimData.subscription_id,
                     customer_id: claimData.customer_id,
-                    last4: claimData.last4,
+                    last4: claim_data?.last4 || claimData.last4,
                     card_expiry: claimData.card_expiry
                 };
             }
