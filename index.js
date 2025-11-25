@@ -37,7 +37,7 @@ const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL;
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL;
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@nazatradingacademy.com';
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
@@ -404,83 +404,92 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 // Nota: sendWelcomeEmail ahora acepta un token opcional existingToken. Si se pasa, usa ese token
 // (evita crear un claim duplicado). Si no se pasa, crea el claim como antes.
 
-// REEMPLAZADO: buildWelcomeEmailHtml ahora muestra el enlace en texto, añade data-token y el token para debug/copia
+// REEMPLAZADO: buildWelcomeEmailHtml ahora con diseño oscuro, logo redondo y mejor contraste
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
-    // Logo hosted (user requested URL) and styled to be circular + zoomed
-    const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+    // Logo: usa tu imagen en Supabase (zoom + recorte via object-fit)
+    const logoUrl = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
 
     return `<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <style>
-    body{font-family:Arial,sans-serif;background:#0b0f14;margin:0;padding:0;color:#e6eef8}
-    .wrap{max-width:680px;margin:24px auto;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03)}
-    .header{padding:28px 24px 8px 24px;text-align:center}
-    .logo-container{width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a)}
-    .logo{width:100%;height:100%;object-fit:cover;transform:scale(1.12);display:block}
-    h1{color:#ff9b3b;margin:18px 0 8px 0;font-size:26px}
-    .sub{color:#cbd5e1;margin:6px 0 20px 0;font-size:16px}
-    .content{padding:20px 28px 28px 28px;color:#d6e6f8;line-height:1.5}
-    .lead{font-size:15px;margin-bottom:16px}
-    .panel{background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:18px}
-    .btn{display:inline-block;background:#2d9bf0;color:#fff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(45,155,240,0.15)}
-    .muted{color:#9fb0c9;font-size:13px;margin-top:8px}
-    .site-link{display:block;background:rgba(255,255,255,0.02);padding:14px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02)}
-    .small-cta{display:inline-block;padding:10px 16px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);margin-right:12px;text-decoration:none;color:#d6e6f8;font-weight:600;background:transparent}
-    .footer{padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02)}
-    .details{font-size:13px;color:#9fb0c9;margin-top:12px}
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  /* Reset básico */
+  body,html{margin:0;padding:0;width:100%;-webkit-text-size-adjust:none}
+  body{background:#06070b;font-family:Inter,Helvetica,Arial,sans-serif;color:#d7eafc}
+  .container{max-width:680px;margin:28px auto;padding:20px}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00));border-radius:14px;padding:28px;box-shadow:0 10px 30px rgba(2,6,23,0.7);overflow:hidden;border:1px solid rgba(255,255,255,0.03)}
+  .top{display:flex;flex-direction:column;align-items:center;text-align:center}
+  .logo{width:96px;height:96px;border-radius:50%;overflow:hidden;border:4px solid rgba(255,255,255,0.04);box-shadow:0 6px 18px rgba(3,8,20,0.6);margin-bottom:14px}
+  .logo img{width:120%;height:120%;object-fit:cover;transform:translateY(-6%)} /* zoom y recorte sutil */
+  h1{margin:0;font-size:26px;color:#ff8a2b;font-weight:700;letter-spacing:0.2px}
+  p.lead{margin:12px 0 18px;color:#dbeeff;font-size:16px;line-height:1.5}
+  .section{background:rgba(255,255,255,0.02);padding:18px;border-radius:10px;margin-top:16px}
+  .section h3{margin:0 0 8px;color:#e6f4ff;font-size:15px}
+  .muted{color:rgba(220,235,255,0.7);font-size:13px}
+  .btn{display:inline-block;background:linear-gradient(180deg,#2d9bf0,#1b7fe6);color:#fff;padding:14px 24px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(29,127,230,0.18)}
+  .secondary{display:inline-block;background:transparent;border:1px solid rgba(255,255,255,0.06);color:#dbeeff;padding:10px 16px;border-radius:10px;text-decoration:none;margin-right:10px}
+  .urlBox{background:rgba(255,255,255,0.02);padding:14px;border-radius:8px;margin-top:12px;color:#bfe1ff;word-break:break-all}
+  .small{font-size:12px;color:rgba(220,235,255,0.65)}
+  ul.details{padding-left:18px;margin:6px 0 0;color:#dfefff}
+  .footer{margin-top:20px;text-align:center;color:rgba(200,220,255,0.6);font-size:13px}
+  a.link{color:#8ad0ff;text-decoration:none}
+  /* Responsive */
+  @media (max-width:520px){ .container{padding:12px} .card{padding:18px} h1{font-size:22px} .btn{width:100%;text-align:center} .secondary{width:48%;display:inline-block}}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="header">
-      <div class="logo-container"><img src="${logoPath}" alt="NAZA logo" class="logo"/></div>
+<div class="container">
+  <div class="card">
+    <div class="top">
+      <div class="logo"><img src="${escapeHtml(logoUrl)}" alt="NAZA logo"/></div>
       <h1>NAZA Trading Academy</h1>
-      <div class="sub">¡Bienvenido! Tu suscripción ha sido activada correctamente.</div>
+      <p class="lead">¡Bienvenido ${escapeHtml(name || '')}! Gracias por unirte. Tu suscripción <strong>${escapeHtml(planName || '')}</strong> ha sido activada correctamente.</p>
     </div>
 
-    <div class="content">
-      <div class="lead"><strong>Hola ${escapeHtml(name || 'usuario')},</strong></div>
+    <div class="section">
+      <h3>Cómo entregamos el servicio</h3>
+      <p class="muted">Todos los privilegios de tu plan —cursos, clases en vivo, alertas, análisis y canales exclusivos— se gestionan dentro de <strong>Discord</strong>. Al pulsar <strong>Obtener acceso</strong> accederás al proceso de autorizar tu cuenta vía Discord; cuando completes la autorización te asignaremos automáticamente el rol y desbloquearemos los canales correspondientes según tu plan.</p>
+      <p style="text-align:center;margin-top:18px">
+        <a class="btn" href="${escapeHtml(claimUrl)}" target="_blank" rel="noopener">Obtener acceso</a>
+      </p>
+      <p class="small" style="text-align:center;margin-top:8px">(Botón directo al flujo de autorización — el enlace es de un solo uso.)</p>
+    </div>
 
-      <div class="panel">
-        <p style="margin:0 0 10px 0;"><strong>Entrega del servicio</strong></p>
-        <p style="margin:0;color:#d6e6f8">Todos los privilegios de tu plan —cursos, clases en vivo, análisis exclusivos y canales privados— se gestionan dentro de <strong>Discord</strong>. Al pulsar <em>Obtener acceso</em> recibirás el rol correspondiente y se te desbloquearán automáticamente los canales de tu plan.</p>
-      </div>
+    <div class="section" style="margin-top:18px">
+      <h3>Únete a la comunidad y mantente al día</h3>
+      <p class="muted">Para ver anuncios oficiales, horarios de clases, avisos de sesiones en vivo y para acceder a los enlaces de chat (WhatsApp y Telegram), visita nuestro sitio y sigue las instrucciones para unirte desde allí.</p>
+      <div class="urlBox"><a class="link" href="https://nazatradingacademy.com" target="_blank" rel="noopener">https://nazatradingacademy.com</a></div>
+    </div>
 
-      <div style="text-align:center;margin:22px 0;">
-        <a href="${claimUrl}" data-token="${encodeURIComponent(token)}" class="btn">Obtener acceso</a>
-        <div class="muted">(En caso de no haber reclamado)</div>
-      </div>
+    <div class="section" style="margin-top:18px">
+      <h3>¿Nuevo en Discord o no tienes cuenta?</h3>
+      <p class="muted">Si necesitas ayuda, descarga la app o sigue la guía rápida (español):</p>
+      <p style="margin-top:12px">
+        <a class="secondary" href="https://discord.com/download" target="_blank" rel="noopener">Descargar Discord</a>
+        <a class="secondary" href="https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr" target="_blank" rel="noopener">Cómo crear una cuenta (ES)</a>
+      </p>
+    </div>
 
-      <div class="panel">
-        <p style="margin:0 0 8px 0;"><strong>Únete a la comunidad y mantente al día</strong></p>
-        <p style="margin:0 0 12px 0;color:#d6e6f8">Para ver anuncios oficiales, horarios de clases, avisos de sesiones en vivo y formar parte de los chats (WhatsApp y Telegram), visita nuestro sitio y sigue las instrucciones para unirte a los grupos desde allí.</p>
-        <a class="site-link" href="https://nazatradingacademy.com" target="_blank">https://nazatradingacademy.com</a>
-      </div>
-
-      <div class="panel" style="margin-top:18px;">
-        <p style="margin:0 0 8px 0;"><strong>¿Nuevo en Discord o no tienes cuenta?</strong></p>
-        <p style="margin:0 0 12px 0;color:#d6e6f8">Si necesitas ayuda, usa los enlaces de abajo:</p>
-        <a class="small-cta" href="https://discord.com/download" target="_blank">Descargar Discord</a>
-        <a class="small-cta" href="https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr" target="_blank">Cómo crear una cuenta (ES)</a>
-      </div>
-
-      <div class="details">
-        <div><strong>Detalles de la suscripción:</strong></div>
-        <div>Plan: ${escapeHtml(planName)}</div>
-        <div>ID de suscripción: ${escapeHtml(subscriptionId || '')}</div>
-        <div>Email: ${escapeHtml(emailSafe(email) || '')}</div>
-        <div style="margin-top:6px;font-size:12px;color:#8fa6bf">El enlace es de un solo uso y funciona hasta que completes el registro en Discord. Si ya iniciaste sesión con OAuth2, no es necesario volver a usarlo.</div>
-      </div>
+    <div style="margin-top:16px;color:#e6f4ff">
+      <strong>Detalles de la suscripción:</strong>
+      <ul class="details">
+        <li>Plan: ${escapeHtml(planName || '')}</li>
+        <li>ID de suscripción: ${escapeHtml(subscriptionId || '')}</li>
+        <li>Email: ${escapeHtml(emailSafe(email) || '')}</li>
+      </ul>
+      <p class="small" style="margin-top:10px">Si el botón no funciona, copia y pega este enlace en tu navegador:</p>
+      <div class="urlBox"><a class="link" href="${escapeHtml(claimUrl)}" target="_blank" rel="noopener">${escapeHtml(claimUrl)}</a></div>
+      <p class="small" style="margin-top:8px">Token (solo para copia/debug): <span style="color:#aacfff">${encodeURIComponent(token)}</span></p>
     </div>
 
     <div class="footer">
-      <div>© ${new Date().getFullYear()} NAZA Trading Academy</div>
-      <div style="margin-top:6px">Soporte: <a href="mailto:support@nazatradingacademy.com" style="color:#bfe0ff;text-decoration:none">support@nazatradingacademy.com</a></div>
+      © ${new Date().getFullYear()} NAZA Trading Academy<br/>
+      Soporte: <a class="link" href="mailto:${escapeHtml(SUPPORT_EMAIL || 'support@nazatradingacademy.com')}">${escapeHtml(SUPPORT_EMAIL || 'support@nazatradingacademy.com')}</a>
     </div>
   </div>
+</div>
 </body>
 </html>`;
 }
@@ -488,30 +497,26 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail, email, token }) {
     return `Hola ${name || 'usuario'},
 
-¡Bienvenido a NAZA Trading Academy! Tu suscripción ha sido activada correctamente.
-
-Entrega del servicio:
-Todos los privilegios de tu plan —cursos, clases en vivo, análisis y canales exclusivos— se entregan a través de Discord. Al pulsar "Obtener acceso" se te asignará automáticamente el rol correspondiente y se desbloquearán los canales de tu plan.
-
-Únete a la comunidad:
-Para anuncios oficiales, horarios de clases y unirte a los chats (WhatsApp y Telegram), visita:
-https://nazatradingacademy.com
-
-Si no tienes Discord:
-- Descargar Discord: https://discord.com/download
-- Cómo crear una cuenta (ES): https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr
-
-Enlace para obtener acceso (un solo uso — válido hasta completar registro):
-${claimUrl}
-
-Detalles:
-Plan: ${planName}
-ID de suscripción: ${subscriptionId || ''}
+¡Bienvenido a NAZA Trading Academy! Tu suscripción "${planName}" ha sido activada correctamente.
+ID de suscripción: ${subscriptionId}
 Email: ${email || ''}
 
-Soporte: support@nazatradingacademy.com
+Cómo recibir tu servicio:
+Todos los privilegios (cursos, clases en vivo, alertas y canales exclusivos) se gestionan dentro de Discord.
+Haz clic en el siguiente enlace para completar la autorización y obtener acceso a los canales de tu plan:
+${claimUrl}
 
-Nota: El enlace es de un solo uso y funcionará hasta que completes el proceso en Discord.
+Si el enlace no funciona, cópialo y pégalo en tu navegador. El enlace es de un solo uso.
+
+Únete a la comunidad y mantente al día:
+https://nazatradingacademy.com
+
+Descargar Discord: https://discord.com/download
+Cómo crear una cuenta (ES): https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr
+
+Soporte: ${supportEmail || SUPPORT_EMAIL || 'support@nazatradingacademy.com'}
+
+Token (copia/debug): ${token}
 `;
 }
 
