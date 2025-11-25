@@ -34,7 +34,7 @@ const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL;
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL;
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL || http://localhost:${PORT};
+const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const BOT_URL = process.env.BOT_URL || BASE_URL; // URL pública de tu bot para links
 const FRONTEND_URL = process.env.FRONTEND_URL || ''; // opcional
 
@@ -69,7 +69,7 @@ discordClient.once('ready', () => {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
   global: {
     headers: {
-      Authorization: Bearer ${SUPABASE_SERVICE_ROLE},
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
       apikey: SUPABASE_SERVICE_ROLE
     }
   }
@@ -225,10 +225,10 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   // DEBUG: Comprobación REST directa antes de usar supabase-js
   try {
     console.log('DEBUG: probando REST direct a /rest/v1/memberships');
-    const restResp = await fetch(${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/memberships?select=*&limit=1, {
+    const restResp = await fetch(`${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/memberships?select=*&limit=1`, {
       headers: {
         apikey: SUPABASE_SERVICE_ROLE,
-        Authorization: Bearer ${SUPABASE_SERVICE_ROLE},
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
         Accept: 'application/json'
       }
     });
@@ -517,7 +517,7 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   }
 
   // <-- CAMBIO: OAuth2 DIRECTO (el botón del correo irá directamente al OAuth2 de Discord)
-  const claimUrl = https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)};
+  const claimUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)}`;
 
   // Pasar token al template HTML y al texto
   const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL, token });
@@ -526,7 +526,7 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   const msg = {
     to: email,
     from: FROM_EMAIL,
-    subject: ¡Bienvenido a NAZA Trading Academy! — Obtener acceso,
+    subject: `¡Bienvenido a NAZA Trading Academy! — Obtener acceso`,
     text,
     html
   };
@@ -591,7 +591,7 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     setTimeout(()=> pendingAuths.delete(token), 10 * 60 * 1000);
 
     // Construimos la URL de OAuth usando el token como state (igual que /api/auth/claim)
-    const oauthUrl = https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${token};
+    const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${token}`;
 
     // Enviar email con claim (usando el mismo token para evitar duplicados)
     sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { last4, cardExpiry, source: 'frontend_confirm' }, token)
@@ -635,7 +635,7 @@ app.get('/api/auth/claim', async (req, res) => {
     const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
     const scope = encodeURIComponent('identify guilds.join');
     const prompt = 'consent';
-    const discordAuthUrl = https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${state}&prompt=${prompt};
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${state}&prompt=${prompt}`;
     return res.redirect(discordAuthUrl);
   } catch (err) {
     console.error('❌ Error en /api/auth/claim:', err);
@@ -708,7 +708,7 @@ app.get('/discord/callback', async (req, res) => {
 
     // Obtener info del usuario
     const userResponse = await fetch('https://discord.com/api/users/@me', {
-      headers: { Authorization: Bearer ${tokenData.access_token} }
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
     });
     const userData = await userResponse.json();
     const discordId = userData.id;
@@ -717,10 +717,10 @@ app.get('/discord/callback', async (req, res) => {
 
     // Agregar al servidor (invite via OAuth2)
     try {
-      await fetch(https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}, {
+      await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`, {
         method: 'PUT',
         headers: {
-          'Authorization': Bot ${DISCORD_BOT_TOKEN},
+          'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ access_token: tokenData.access_token })
@@ -787,7 +787,7 @@ app.get('/discord/callback', async (req, res) => {
     // Si venía de pendingAuths, limpiamos pendingAuths.delete(state);
 
     // Redirigir a frontend o mostrar página de éxito
-    const successRedirect = FRONTEND_URL ? ${FRONTEND_URL}/gracias : 'https://discord.gg/sXjU5ZVzXU';
+    const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg/sXjU5ZVzXU';
     return res.send(`
 <!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
 <body style="font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
