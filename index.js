@@ -40,14 +40,13 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const BOT_URL = process.env.BOT_URL || BASE_URL; // URL pública de tu bot para links
 const FRONTEND_URL = process.env.FRONTEND_URL || ''; // opcional
 
-// NOWPayments config
+// NOWPayments config (nuevas vars necesarias)
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || '';
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
 const CPLAN_ID_MENSUALNOW = process.env.CPLAN_ID_MENSUALNOW || '';
 const CPLAN_ID_TRIMESTRALNOW = process.env.CPLAN_ID_TRIMESTRALNOW || '';
 const CPLAN_ID_ANUALNOW = process.env.CPLAN_ID_ANUALNOW || '';
 const NOWPAYMENTS_API_URL = 'https://api.nowpayments.io/v1';
-const NOWPAYMENTS_PAY_CURRENCY = (process.env.NOWPAYMENTS_PAY_CURRENCY || '').trim(); // opcional
 
 // ============================================
 // CONFIGURAR SENDGRID
@@ -80,6 +79,7 @@ if (DISCORD_BOT_TOKEN) {
 
 // ============================================
 // SUPABASE CLIENT
+// Añado headers globales para asegurar que use la service_role key en las llamadas
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
   global: {
     headers: {
@@ -107,22 +107,26 @@ function getRoleIdForPlan(planId) {
 }
 
 // ============================================
-// --- NUEVAS FUNCIONES: CRYPTO / NOWPAYMENTS ---
+// --- NUEVAS FUNCIONES: DETECCIÓN Y NOWPAYMENTS (NO INVADEN funciones existentes) ---
 
-// Normaliza texto: minúsculas, sin acentos, ñ -> n
+/**
+ * Normaliza texto: minúsculas, sin acentos, sustituye ñ por n
+ */
 function normalize(str = '') {
   return String(str || '')
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u0300-\u036f]/g, '') // quita acentos
     .replace(/ñ/g, 'n');
 }
 
 /**
- * Resuelve CPLAN_ID_* según plan_id o product_name.
- * - "mensual" / "señales" => CPLAN_ID_MENSUALNOW
- * - "trimestral" / "desde cero" => CPLAN_ID_TRIMESTRALNOW
- * - "anual" / "educación total" => CPLAN_ID_ANUALNOW
+ * Resuelve CPLAN_ID_* (valor de env) según plan_id o product_name (para NOWPayments).
+ *
+ * Reglas (por tu orden):
+ * - Si aparece 'mensual' / 'senales' -> CPLAN_ID_MENSUALNOW
+ * - Si aparece 'trimestral' / 'desde cero' -> CPLAN_ID_TRIMESTRALNOW
+ * - Si aparece 'anual' / 'educacion total' -> CPLAN_ID_ANUALNOW
  */
 function resolveNowPlanId(plan_id, product_name) {
   const haystack = normalize(`${plan_id || ''} ${product_name || ''}`);
@@ -139,7 +143,7 @@ function resolveNowPlanId(plan_id, product_name) {
     return CPLAN_ID_ANUALNOW || null;
   }
 
-  // TRIMESTRAL / DESDE CERO
+  // TRIMESTRAL / "desde cero"
   if (
     haystack.includes('plan_trimestral') ||
     haystack.includes('trimestral') ||
@@ -151,7 +155,7 @@ function resolveNowPlanId(plan_id, product_name) {
     return CPLAN_ID_TRIMESTRALNOW || null;
   }
 
-  // MENSUAL / SEÑALES
+  // MENSUAL / SENALES
   if (
     haystack.includes('plan_mensual') ||
     haystack.includes('mensual') ||
@@ -166,16 +170,54 @@ function resolveNowPlanId(plan_id, product_name) {
 }
 
 /**
- * Crea un pago en NOWPayments usando product_id (CPLAN_ID_*).
- * IMPORTANTE: no mandamos pay_currency: null (causaba "pay_currency must be a string").
- * Solo se envía pay_currency si está configurado en env NOWPAYMENTS_PAY_CURRENCY.
+ * Mapea texto del plan a plan_id interno del bot (plan_mensual / plan_trimestral / plan_anual)
+ * usando las mismas palabras clave que usas en el sitio.
+ */
+function mapToBotPlanId(plan_id, product_name) {
+  const haystack = normalize(`${plan_id || ''} ${product_name || ''}`);
+
+  if (haystack.includes('mensual') || haystack.includes('senales') || haystack.includes('senal')) {
+    return 'plan_mensual';
+  }
+
+  if (
+    haystack.includes('trimestral') ||
+    haystack.includes('desde cero') ||
+    haystack.includes('desde 0') ||
+    haystack.includes('educacion desde 0') ||
+    haystack.includes('educacion desde cero')
+  ) {
+    return 'plan_trimestral';
+  }
+
+  if (
+    haystack.includes('anual') ||
+    haystack.includes('educacion total') ||
+    haystack.includes('educacion completa') ||
+    haystack.includes('total')
+  ) {
+    return 'plan_anual';
+  }
+
+  return null;
+}
+
+/**
+ * Crea un payment/invoice en NOWPayments usando product_id (CPLAN_ID_*).
+ * - Intenta usar product_id si está presente (recomendado).
+ * - Si product_id no está configurado, usa price_amount (fallback clásico).
+ *
+ * Retorna el JSON de respuesta de NOWPayments.
  */
 async function createNowPaymentsOrder({ productId, amountUsd, orderId, description, customerEmail }) {
   if (!NOWPAYMENTS_API_KEY) throw new Error('NOWPAYMENTS_API_KEY no definida en env');
 
   const body = {
+    // price_amount + price_currency en USD (coinciden con lo que ves en tu dashboard)
     ...(amountUsd ? { price_amount: amountUsd, price_currency: 'usd' } : {}),
-    ...(NOWPAYMENTS_PAY_CURRENCY ? { pay_currency: NOWPAYMENTS_PAY_CURRENCY } : {}),
+    // IMPORTANTE: pay_currency debe ser un string; 'any' permite todas las monedas
+    pay_currency: 'any',
+    // si tienes productId (CPLAN_ID_*), pásalo
     ...(productId ? { product_id: String(productId) } : {}),
     order_id: String(orderId || `order-${Date.now()}`),
     order_description: description || 'Pago NAZA',
@@ -201,55 +243,6 @@ async function createNowPaymentsOrder({ productId, amountUsd, orderId, descripti
   }
 
   return data;
-}
-
-/**
- * Guarda una orden CRYPTO en Supabase para poder identificarla cuando llegue el webhook.
- * No afecta al flujo de tarjeta.
- */
-async function recordCryptoOrder({
-  orderId,
-  nowProductId,
-  plan_id,
-  product_name,
-  email,
-  user_name,
-  membership_id,
-  paymentResp
-}) {
-  try {
-    const paymentId = paymentResp?.payment_id || paymentResp?.id || null;
-    const paymentStatus = paymentResp?.payment_status || 'waiting';
-
-    const row = {
-      order_id: orderId,
-      now_product_id: nowProductId,
-      plan_id: plan_id || null,
-      product_name: product_name || null,
-      email: (email || '').toLowerCase(),
-      user_name: user_name || null,
-      membership_id: membership_id || null,
-      payment_id: paymentId,
-      payment_status: paymentStatus,
-      status: 'pending',
-      welcome_sent: false,
-      price_amount: paymentResp?.price_amount || null,
-      price_currency: paymentResp?.price_currency || null,
-      pay_currency: paymentResp?.pay_currency || null,
-      pay_amount: paymentResp?.pay_amount || null,
-      actually_paid: paymentResp?.actually_paid || null,
-      created_at: new Date().toISOString()
-    };
-
-    const { error } = await supabase.from('crypto_orders').insert(row);
-    if (error) {
-      console.error('❌ Error insertando crypto_orders:', error);
-    } else {
-      console.log('✅ crypto_orders registrado:', { orderId, paymentId, paymentStatus });
-    }
-  } catch (err) {
-    console.error('❌ Error en recordCryptoOrder:', err);
-  }
 }
 
 // ============================================
@@ -287,6 +280,7 @@ function emailSafe(e){ return e || ''; }
 
 // ============================================
 // ENDPOINT: Verificar si se puede crear un claim / validar email y tarjeta
+// Protegido por authenticateFrontend (usa x-frontend-token)
 app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
   try {
     const { email: rawEmail, last4 = '', card_expiry = '' } = req.body || {};
@@ -318,16 +312,18 @@ app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
     const existsClaim = Array.isArray(claimRows) && claimRows.length > 0;
     const existingClaimUsed = existsClaim ? !!claimRows[0].used : false;
 
-    // 3) Contar emails distintos asociados a esta tarjeta (solo si hay last4+expiry)
+    // 3) Contar emails distintos asociados a esta tarjeta (memberships + claims)
     let cardUsageCount = 0;
-    if (last4 && last4.toString().trim() !== '' && card_expiry && card_expiry.toString().trim() !== '') {
+    if (last4 && last4.toString().trim() !== '') {
       try {
+        // Preferir RPC si existe
         const { data: cardEmails, error: rpcErr } = await supabase.rpc('naza_get_card_emails', { in_last4: last4, in_card_expiry: card_expiry });
         if (!rpcErr && Array.isArray(cardEmails)) {
           const setEmails = new Set((cardEmails || []).map(r => (r.email || '').toLowerCase()));
           setEmails.delete('');
           cardUsageCount = setEmails.size;
         } else {
+          // fallback: get distinct emails from memberships and claims
           const [{ data: mEmails, error: mErr }, { data: cEmails, error: cErr }] = await Promise.all([
             supabase.from('memberships').select('email').eq('last4', last4).eq('card_expiry', card_expiry),
             supabase.from('claims').select('email').eq('last4', last4).eq('card_expiry', card_expiry)
@@ -346,8 +342,9 @@ app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
       }
     }
 
+    // 4) Regla: si cardUsageCount >= 2 y el email no está ya en ese set -> bloquear
     let cardBlocked = false;
-    if (cardUsageCount >= 2 && last4 && last4.toString().trim() !== '' && card_expiry && card_expiry.toString().trim() !== '') {
+    if (cardUsageCount >= 2 && last4 && last4.toString().trim() !== '') {
       const [{ data: mHas }, { data: cHas }] = await Promise.all([
         supabase.from('memberships').select('id').eq('email', email).eq('last4', last4).eq('card_expiry', card_expiry).limit(1),
         supabase.from('claims').select('id').eq('email', email).eq('last4', last4).eq('card_expiry', card_expiry).limit(1)
@@ -356,6 +353,7 @@ app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
       if (!alreadyUsingThisCard) cardBlocked = true;
     }
 
+    // 5) Construir respuesta con razones
     const allowed = !existsMembership && !existsClaim && !cardBlocked;
     const reasons = [];
     if (existsMembership) reasons.push('email_already_registered');
@@ -370,11 +368,11 @@ app.post('/api/validate-claim', authenticateFrontend, async (req, res) => {
 });
 
 // ============================================
-// FUNCIONES AUX: createClaimToken
+// FUNCIONES AUX: createClaimToken (TARJETA) y createCryptoClaimToken (CRIPTO)
+
+// TARJETA: se mantiene igual, con validación de tarjeta
 async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra = {} }) {
   email = (email || '').trim().toLowerCase();
-  last4 = last4 || '';
-  cardExpiry = cardExpiry || '';
 
   // DEBUG: Comprobación REST directa antes de usar supabase-js
   try {
@@ -388,7 +386,7 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     });
     console.log('DEBUG rest status:', restResp.status);
     const restText = await restResp.text();
-    console.log('DEBUG rest body:', restText.substring(0, 2000));
+    console.log('DEBUG rest body:', restText.substring(0, 2000)); // recorta por seguridad
   } catch (dbgErr) {
     console.error('DEBUG rest fetch error:', dbgErr);
   }
@@ -426,40 +424,41 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
       throw new Error('Error interno');
     }
     if (existingClaimsForEmail && existingClaimsForEmail.length > 0) {
+      // Si ya hay un claim (sea usado o no), prevenir duplicado por email
       throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
     }
   } catch (err) {
     throw err;
   }
 
-  // 3) Verificar uso de la tarjeta (solo si hay last4+cardExpiry; para CRYPTO se salta)
-  if (last4 && cardExpiry) {
-    try {
-      const [{ data: mRows, error: mErr }, { data: cRows, error: cErr }] = await Promise.all([
-        supabase.from('memberships').select('email').eq('last4', last4).eq('card_expiry', cardExpiry),
-        supabase.from('claims').select('email').eq('last4', last4).eq('card_expiry', cardExpiry)
-      ]);
-      if (mErr) {
-        console.error('Error consultando memberships por tarjeta:', mErr);
-      }
-      if (cErr) {
-        console.error('Error consultando claims por tarjeta:', cErr);
-      }
-      const distinctEmails = new Set();
-      (mRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
-      (cRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
-      distinctEmails.delete('');
-      if (distinctEmails.size >= 2 && !distinctEmails.has(email)) {
-        throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.');
-      }
-    } catch (err) {
-      throw err;
+  // 3) Verificar uso de la tarjeta (no permitir >2 correos distintos)
+  try {
+    // obtener emails distintos tanto de memberships como de claims usando esa tarjeta
+    const [{ data: mRows, error: mErr }, { data: cRows, error: cErr }] = await Promise.all([
+      supabase.from('memberships').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || ''),
+      supabase.from('claims').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || '')
+    ]);
+    if (mErr) {
+      console.error('Error consultando memberships por tarjeta:', mErr);
+      // no abortar aún, continuamos con lo que tengamos
     }
-  } else {
-    console.log('createClaimToken: sin datos de tarjeta, se omite validación de uso de tarjeta (flujo cripto u otro).');
+    if (cErr) {
+      console.error('Error consultando claims por tarjeta:', cErr);
+    }
+    const distinctEmails = new Set();
+    (mRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
+    (cRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
+    distinctEmails.delete('');
+    // Si ya hay 2 o más emails distintos usando esa tarjeta --> bloquear
+    if (distinctEmails.size >= 2 && !distinctEmails.has(email)) {
+      throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.');
+    }
+  } catch (err) {
+    throw err;
   }
 
-  // 3b) Recheck race-condition
+  // 3b) (Recheck race-condition): asegurar que entre la verificación y el insert no apareció otro claim/membership
+  // Esto es una segunda verificación inmediata antes del insert.
   try {
     const [{ data: recheckMembership, error: rMemErr }, { data: recheckClaim, error: rClaimErr }] = await Promise.all([
       supabase.from('memberships').select('id').eq('email', email).limit(1),
@@ -488,8 +487,8 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   const row = {
     token,
     email,
-    last4,
-    card_expiry: cardExpiry,
+    last4: last4 || '',
+    card_expiry: cardExpiry || '',
     name: name || '',
     plan_id: plan_id || '',
     subscription_id: subscriptionId || '',
@@ -499,11 +498,105 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     created_at: new Date().toISOString()
   };
   try {
-    const { error: insertErr } = await supabase
+    const { data: insertData, error: insertErr } = await supabase
       .from('claims')
       .insert([row]);
     if (insertErr) {
       console.error('Error insertando claim:', insertErr);
+      // En caso de conflicto por unique constraint en email o token, devolver mensaje amigable
+      throw new Error('No se pudo crear el claim');
+    }
+    return token;
+  } catch (err) {
+    throw err;
+  }
+}
+
+// CRIPTO: NUEVA FUNCIÓN. NO TOCA LA LÓGICA DE TARJETA.
+async function createCryptoClaimToken({ email, name, plan_id, extra = {} }) {
+  email = (email || '').trim().toLowerCase();
+
+  // 1) Verificar si ya existe una membresía (memberships) con ese email
+  try {
+    const { data: existingMembership, error: memErr } = await supabase
+      .from('memberships')
+      .select('id')
+      .eq('email', email)
+      .limit(1);
+    if (memErr) {
+      console.error('Error consultando memberships (crypto):', memErr);
+      throw new Error('Error interno');
+    }
+    if (existingMembership && existingMembership.length > 0) {
+      throw new Error('Este correo ya está registrado');
+    }
+  } catch (err) {
+    throw err;
+  }
+
+  // 2) Verificar si ya hay un claim pendiente para ese email (sin consumir)
+  try {
+    const { data: existingClaimsForEmail, error: claimErr } = await supabase
+      .from('claims')
+      .select('id, used')
+      .eq('email', email)
+      .limit(1);
+    if (claimErr) {
+      console.error('Error consultando claims por email (crypto):', claimErr);
+      throw new Error('Error interno');
+    }
+    if (existingClaimsForEmail && existingClaimsForEmail.length > 0) {
+      throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
+    }
+  } catch (err) {
+    throw err;
+  }
+
+  // 3) Recheck race-condition (igual que en tarjeta, pero sin tarjeta)
+  try {
+    const [{ data: recheckMembership, error: rMemErr }, { data: recheckClaim, error: rClaimErr }] = await Promise.all([
+      supabase.from('memberships').select('id').eq('email', email).limit(1),
+      supabase.from('claims').select('id,used').eq('email', email).limit(1)
+    ]);
+    if (rMemErr) {
+      console.error('rMemErr (crypto):', rMemErr);
+      throw new Error('Error interno');
+    }
+    if (recheckMembership && recheckMembership.length > 0) {
+      throw new Error('Este correo ya está registrado');
+    }
+    if (rClaimErr) {
+      console.error('rClaimErr (crypto):', rClaimErr);
+      throw new Error('Error interno');
+    }
+    if (recheckClaim && recheckClaim.length > 0) {
+      throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
+    }
+  } catch (err) {
+    throw err;
+  }
+
+  // 4) Generar token e insertar claim (sin datos de tarjeta)
+  const token = crypto.randomBytes(24).toString('hex');
+  const row = {
+    token,
+    email,
+    last4: '',
+    card_expiry: '',
+    name: name || '',
+    plan_id: plan_id || '',
+    subscription_id: '',
+    customer_id: '',
+    extra: JSON.stringify(extra || {}),
+    used: false,
+    created_at: new Date().toISOString()
+  };
+  try {
+    const { error: insertErr } = await supabase
+      .from('claims')
+      .insert([row]);
+    if (insertErr) {
+      console.error('Error insertando claim (crypto):', insertErr);
       throw new Error('No se pudo crear el claim');
     }
     return token;
@@ -514,9 +607,14 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 
 // ============================================
 // EMAIL: Templates y envíos (SendGrid)
+
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
+  // Logo hosted (user requested URL) and styled to be circular + zoomed
   const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
 
+  // Note: to force dark background inside Gmail we use a full-width outer table with bgcolor
+  // and inline background-color styles on the container elements. We also add meta tags
+  // for color-scheme. All other content/colors kept as before.
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -525,18 +623,22 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 <meta name="color-scheme" content="dark light">
 <meta name="supported-color-schemes" content="dark light">
 <style>
+/* keep minimal CSS; inline styles are primary for email clients */
 @media (prefers-color-scheme: dark) {
   .wrap { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important; }
 }
 </style>
 </head>
 <body style="margin:0;padding:0;background-color:#000000;">
+  <!-- Outer full-width table to ensure email clients (including Gmail) render dark background -->
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;">
     <tr>
       <td align="center" valign="top">
+        <!-- Centered container -->
         <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;">
           <tr>
             <td style="padding:0 16px;">
+              <!-- Card -->
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);">
                 <tr>
                   <td style="padding:28px 24px 8px 24px;text-align:center;">
@@ -594,6 +696,7 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
                 </tr>
 
               </table>
+              <!-- end card -->
             </td>
           </tr>
         </table>
@@ -649,13 +752,16 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   const last4 = extra.last4 || '';
   const cardExpiry = extra.cardExpiry || '';
 
+  // Si nos pasan existingToken, NO creamos uno nuevo (asumimos ya creado previamente)
   let token = existingToken;
   if (!token) {
     token = await createClaimToken({ email, name, plan_id: planId, subscriptionId, customerId, last4, cardExpiry, extra });
   }
 
+  // <-- CAMBIO: OAuth2 DIRECTO (el botón del correo irá directamente al OAuth2 de Discord)
   const claimUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)}`;
 
+  // Pasar token al template HTML y al texto
   const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL, token });
   const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email, token });
 
@@ -668,47 +774,79 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   };
 
   try {
+    // <-- DEBUG LINES (ya añadidas por ti)
     console.log('DEBUG sendWelcomeEmail -> token:', token);
     console.log('DEBUG sendWelcomeEmail -> claimUrl:', claimUrl);
+    // <-- end debug lines
     const result = await sgMail.send(msg);
     console.log('✅ Email enviado a:', email, 'SendGrid result:', result?.[0]?.statusCode || 'unknown');
   } catch (error) {
     console.error('❌ Error enviando email con SendGrid:', error?.message || error);
     if (error?.response?.body) console.error('SendGrid response body:', error.response.body);
+    // Dejar que el flujo de pago siga, pero informa del fallo
     throw error;
   }
 }
 
 // ============================================
-// ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND
-// - Si payment_method === 'crypto' => flujo NOWPayments
-// - Si no, flujo TARJETA (Braintree) como siempre
+// ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND (tarjeta + cripto NOWPayments)
 app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
   console.log('📬 POST /api/frontend/confirm');
   try {
+    // Nuevo: si frontend marca payment_method === 'crypto', manejamos CRYPTO aquí y salimos.
     const { payment_method } = req.body || {};
-
-    // ---------- FLUJO CRYPTO (NOWPAYMENTS) ----------
     if (payment_method && String(payment_method).toLowerCase() === 'crypto') {
       console.log('🔔 /api/frontend/confirm -> flujo CRYPTO detectado');
 
       const { plan_id, product_name, email, user_name, membership_id } = req.body || {};
+      // validar campos mínimos
       if (!email || (!plan_id && !product_name)) {
         return res.status(400).json({ success: false, message: 'Faltan datos requeridos para cripto: email y plan/product_name' });
       }
 
+      // Resolver CPLAN_ID_* basado en plan_id o product_name (para NowPayments)
       const nowProductId = resolveNowPlanId(plan_id, product_name);
       if (!nowProductId) {
-        return res.status(400).json({ success: false, message: 'No se pudo identificar el plan cripto (mensual/trimestral/anual).' });
+        return res.status(400).json({ success: false, message: 'No se pudo identificar el plan cripto (mensual/trimestral/anual). Revisa plan_id o product_name.' });
       }
 
+      // Plan interno del bot (para roles / email)
+      const botPlanId = mapToBotPlanId(plan_id, product_name);
+      if (!botPlanId) {
+        return res.status(400).json({ success: false, message: 'No se pudo mapear el plan interno del bot (plan_mensual / plan_trimestral / plan_anual).' });
+      }
+
+      // Monto fallback (si tu NowPayments usa product_id con precio configurado, puedes omitir priceAmount)
+      // Ajusta estos montos si los tuyos son distintos
       let amountUsd = null;
       if (nowProductId === CPLAN_ID_MENSUALNOW) amountUsd = 19;
       if (nowProductId === CPLAN_ID_TRIMESTRALNOW) amountUsd = 119;
       if (nowProductId === CPLAN_ID_ANUALNOW) amountUsd = 390;
 
-      const orderId = `${nowProductId}-${(membership_id || 'guest')}-${Date.now()}`;
+      // Generar orderId único (lo usamos también en Supabase)
+      const orderId = `${nowProductId}-${membership_id || 'guest'}-${Date.now()}`;
 
+      // Guardar orden en tabla crypto_orders (NO toca memberships de tarjeta)
+      try {
+        const baseRow = {
+          order_id: orderId,
+          now_product_id: String(nowProductId),
+          plan_id: botPlanId,
+          product_name: product_name || plan_id || '',
+          email,
+          user_name: user_name || '',
+          membership_id: membership_id || null,
+          status: 'pending',
+          payment_status: 'waiting',
+          created_at: new Date().toISOString()
+        };
+        const { error: coErr } = await supabase.from('crypto_orders').insert([baseRow]);
+        if (coErr) console.error('❌ Error insertando crypto_orders (pre-NOWPayments):', coErr);
+      } catch (err) {
+        console.error('❌ Error inesperado insert crypto_orders:', err);
+      }
+
+      // Crear orden/pago en NOWPayments
       let paymentResp = null;
       try {
         paymentResp = await createNowPaymentsOrder({
@@ -723,18 +861,39 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
         return res.status(500).json({ success: false, message: 'Error creando pago cripto', detail: err.message || String(err) });
       }
 
-      // Registrar la orden cripto en Supabase para poder enlazarla en el webhook
-      await recordCryptoOrder({
+      const paymentId = String(paymentResp?.payment_id || paymentResp?.id || '');
+      const paymentStatus = paymentResp?.payment_status || paymentResp?.paymentStatus || 'waiting';
+
+      console.log('NowPayments response (crypto):', {
+        productId: nowProductId,
         orderId,
-        nowProductId,
-        plan_id,
-        product_name,
-        email,
-        user_name,
-        membership_id,
-        paymentResp
+        paymentId,
+        paymentStatus
       });
 
+      // Actualizar crypto_orders con datos de NOWPayments
+      try {
+        const update = {
+          payment_id: paymentId || null,
+          payment_status: paymentStatus,
+          status: paymentStatus,
+          price_amount: paymentResp?.price_amount ?? null,
+          price_currency: paymentResp?.price_currency ?? null,
+          pay_currency: paymentResp?.pay_currency ?? null,
+          pay_amount: paymentResp?.pay_amount ?? null,
+          actually_paid: paymentResp?.actually_paid ?? null,
+          updated_at: new Date().toISOString()
+        };
+        const { error: upErr } = await supabase
+          .from('crypto_orders')
+          .update(update)
+          .eq('order_id', orderId);
+        if (upErr) console.error('❌ Error actualizando crypto_orders (post-NOWPayments):', upErr);
+      } catch (err) {
+        console.error('❌ Error inesperado update crypto_orders:', err);
+      }
+
+      // extraer la URL de pago (varios campos posibles segun respuesta)
       const redirectUrl =
         paymentResp?.invoice_url ||
         paymentResp?.payment_url ||
@@ -743,16 +902,27 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
         paymentResp?.redirect_url ||
         null;
 
-      console.log('NowPayments response (crypto):', { productId: nowProductId, orderId, redirectUrl });
-
       if (redirectUrl) {
-        return res.json({ success: true, redirect: redirectUrl, now_product_id: nowProductId, order: orderId });
+        return res.json({
+          success: true,
+          redirect: redirectUrl,
+          now_product_id: nowProductId,
+          order: orderId
+        });
       } else {
-        return res.json({ success: true, payment: paymentResp, now_product_id: nowProductId, order: orderId });
+        // si no vino redirect pero OK, devolver objeto para debug
+        return res.json({
+          success: true,
+          payment: paymentResp,
+          now_product_id: nowProductId,
+          order: orderId
+        });
       }
     }
 
-    // ---------- FLUJO TARJETA (BRAINTREE) ORIGINAL ----------
+    // ------------------------------
+    // LÓGICA EXISTENTE (NO MODIFICAR) - flujo de tarjeta sigue como estaba
+    // ------------------------------
     const { nonce, email, name, plan_id } = req.body;
     console.log('📦 Datos recibidos:', { nonce: nonce ? 'SÍ' : 'NO', email, name, plan_id });
     if (!nonce || !email || !name || !plan_id) {
@@ -767,7 +937,7 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     const paymentMethod = customerResult.customer.paymentMethods[0];
     const paymentMethodToken = paymentMethod.token;
     const last4 = paymentMethod.last4 || '';
-    const cardExpiry = paymentMethod.expirationDate || '';
+    const cardExpiry = paymentMethod.expirationDate || ''; // formato MM/YYYY o MM/YY
 
     const subscriptionResult = await gateway.subscription.create({
       paymentMethodToken: paymentMethodToken,
@@ -781,17 +951,49 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     const customerId = customerResult.customer.id || null;
     console.log('✅ Suscripción creada:', subscriptionId, 'Customer ID:', customerId);
 
-    const token = await createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra: { source: 'frontend_confirm' } });
+    // En lugar de crear un state aleatorio, creamos el claim token y lo usamos como state
+    const token = await createClaimToken({
+      email,
+      name,
+      plan_id,
+      subscriptionId,
+      customerId,
+      last4,
+      cardExpiry,
+      extra: { source: 'frontend_confirm' }
+    });
 
-    pendingAuths.set(token, { email, name, plan_id, subscription_id: subscriptionId, customer_id: customerId, last4, card_expiry: cardExpiry, timestamp: Date.now() });
-    setTimeout(()=> pendingAuths.delete(token), 10 * 60 * 1000);
+    // Guardamos en pendingAuths usando el token como key para que /discord/callback lo reconozca
+    pendingAuths.set(token, {
+      email,
+      name,
+      plan_id,
+      subscription_id: subscriptionId,
+      customer_id: customerId,
+      last4,
+      card_expiry: cardExpiry,
+      timestamp: Date.now()
+    });
+    // Mantener cleanup parecido
+    setTimeout(() => pendingAuths.delete(token), 10 * 60 * 1000);
 
-    const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${token}`;
+    // Construimos la URL de OAuth usando el token como state (igual que /api/auth/claim)
+    const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(
+      DISCORD_REDIRECT_URL
+    )}&response_type=code&scope=identify%20guilds.join&state=${token}`;
 
-    sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { last4, cardExpiry, source: 'frontend_confirm' }, token)
-      .catch(err => console.error('❌ Error al enviar email (background):', err));
+    // Enviar email con claim (usando el mismo token para evitar duplicados)
+    sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { last4, cardExpiry, source: 'frontend_confirm' }, token).catch(err =>
+      console.error('❌ Error al enviar email (background):', err)
+    );
 
-    return res.json({ success: true, subscription_id: subscriptionId, customer_id: customerId, oauth_url: oauthUrl, message: 'Suscripción creada. Recibirás un email con "Obtener acceso".' });
+    return res.json({
+      success: true,
+      subscription_id: subscriptionId,
+      customer_id: customerId,
+      oauth_url: oauthUrl,
+      message: 'Suscripción creada. Recibirás un email con "Obtener acceso".'
+    });
   } catch (error) {
     console.error('❌ Error en /api/frontend/confirm:', error);
     res.status(500).json({ success: false, message: error.message || 'Error interno' });
@@ -800,10 +1002,12 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
 
 // ============================================
 // ENDPOINT: CLAIM (vía email)
+// NO marcamos used aquí — solo redirigimos a Discord. El token se marcará usado al completar /discord/callback
 app.get('/api/auth/claim', async (req, res) => {
   const token = req.query.token;
   if (!token) return res.status(400).send('Token missing');
   try {
+    // Verificamos que exista y no esté usado
     const { data: rows, error } = await supabase
       .from('claims')
       .select('id,token,used')
@@ -821,6 +1025,7 @@ app.get('/api/auth/claim', async (req, res) => {
       return res.status(400).send('Este enlace ya fue utilizado.');
     }
 
+    // Redirigir a OAuth2 de Discord usando token como state
     const state = token;
     const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
     const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
@@ -836,15 +1041,19 @@ app.get('/api/auth/claim', async (req, res) => {
 
 // ============================================
 // ENDPOINT: CALLBACK DE DISCORD OAUTH2
+// - Soporta state que sea token de claim (DB) o state de pendingAuths (memoria)
+// - Si es claim (DB), marcamos used=true SOLO después de registrar en memberships con éxito
 app.get('/discord/callback', async (req, res) => {
   console.log('📬 GET /discord/callback');
   try {
     const { code, state } = req.query;
     if (!code || !state) return res.status(400).send('❌ Faltan parámetros');
 
+    // Intentar recuperar datos desde pendingAuths (frontend flow)
     let authData = pendingAuths.get(state);
     let claimData = null;
     if (!authData) {
+      // Buscar en claims por token = state
       const { data: claimsRows, error: claimErr } = await supabase
         .from('claims')
         .select('*')
@@ -871,8 +1080,13 @@ app.get('/discord/callback', async (req, res) => {
 
     if (!authData) return res.status(400).send('❌ Sesión expirada o inválida');
 
-    console.log('📦 Datos para completar auth:', { email: authData.email, plan_id: authData.plan_id, subscription_id: authData.subscription_id });
+    console.log('📦 Datos para completar auth:', {
+      email: authData.email,
+      plan_id: authData.plan_id,
+      subscription_id: authData.subscription_id
+    });
 
+    // Intercambiar code por access_token en Discord
     const params = new URLSearchParams({
       client_id: DISCORD_CLIENT_ID,
       client_secret: DISCORD_CLIENT_SECRET,
@@ -892,6 +1106,7 @@ app.get('/discord/callback', async (req, res) => {
     }
     console.log('✅ Token obtenido');
 
+    // Obtener info del usuario
     const userResponse = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${tokenData.access_token}` }
     });
@@ -900,6 +1115,7 @@ app.get('/discord/callback', async (req, res) => {
     const discordUsername = userData.username;
     console.log('👤 Usuario Discord:', discordUsername, '(' + discordId + ')');
 
+    // Agregar al servidor (invite via OAuth2)
     try {
       await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`, {
         method: 'PUT',
@@ -914,6 +1130,7 @@ app.get('/discord/callback', async (req, res) => {
       console.log('ℹ️ Usuario ya está en el servidor o no pudo agregarse:', err?.message || err);
     }
 
+    // Asignar rol según plan
     const roleId = getRoleIdForPlan(authData.plan_id);
     console.log('🎭 Asignando rol:', roleId, 'para plan:', authData.plan_id);
     try {
@@ -925,6 +1142,7 @@ app.get('/discord/callback', async (req, res) => {
       console.error('❌ Error asignando rol:', err);
     }
 
+    // Guardar en Supabase memberships (incluyendo last4 y card_expiry si estaban)
     try {
       const membershipRow = {
         email: authData.email,
@@ -949,6 +1167,7 @@ app.get('/discord/callback', async (req, res) => {
       console.error('❌ Error con Supabase (memberships):', err);
     }
 
+    // Si venía de claim (DB), marcar used = true ahora que el registro fue completado
     if (claimData) {
       try {
         const { error: markErr } = await supabase
@@ -965,6 +1184,7 @@ app.get('/discord/callback', async (req, res) => {
       }
     }
 
+    // Redirigir a frontend o mostrar página de éxito
     const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg/sXjU5ZVzXU';
     return res.send(`
 <!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
@@ -983,7 +1203,7 @@ app.get('/discord/callback', async (req, res) => {
 });
 
 // ============================================
-// WEBHOOK DE BRAINTREE
+// WEBHOOK DE BRAINTREE (mantener según tu implementación)
 app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-urlencoded' }), async (req, res) => {
   console.log('📬 Webhook recibido de Braintree');
   try {
@@ -998,139 +1218,131 @@ app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-u
 });
 
 // ============================================
-// WEBHOOK / IPN DE NOWPAYMENTS
+// WEBHOOK de NOWPayments (CRIPTO)
+// Se usa para saber cuándo el pago está "finished" y disparar email + claim.
 app.post('/api/nowpayments/webhook', express.json({ type: '*/*' }), async (req, res) => {
   try {
-    console.log('📬 NowPayments webhook received body:', req.body);
+    const payload = req.body || {};
+    console.log('📬 NowPayments webhook received:', payload);
 
+    // Validar ipn_secret si está configurado
     if (NOWPAYMENTS_IPN_SECRET) {
-      const theirSig =
-        req.headers['x-nowpayments-sig'] ||
-        req.headers['x-nowpayments-signature'] ||
-        req.headers['x-nowpayments-hmac'];
-
-      if (!theirSig) {
-        console.warn('⚠️ Webhook NowPayments sin firma, rechazado');
-        return res.status(400).json({ success: false, error: 'missing_signature' });
-      }
-
-      const payload = JSON.stringify(req.body || {});
-      const mySig = crypto
-        .createHmac('sha512', NOWPAYMENTS_IPN_SECRET)
-        .update(payload)
-        .digest('hex');
-
-      if (theirSig !== mySig) {
-        console.warn('⚠️ Firma NowPayments inválida');
-        return res.status(400).json({ success: false, error: 'invalid_signature' });
+      if (!payload.ipn_secret || payload.ipn_secret !== NOWPAYMENTS_IPN_SECRET) {
+        console.warn('❌ Webhook NOWPayments ipn_secret inválido');
+        return res.status(400).json({ success: false });
       }
     }
 
-    const {
-      payment_id,
-      payment_status,
-      order_id,
-      pay_currency,
-      pay_amount,
-      actually_paid,
-      price_amount,
-      price_currency
-    } = req.body || {};
+    const paymentStatus = payload.payment_status || payload.paymentStatus || payload.status || '';
+    const orderId = payload.order_id || payload.orderId || '';
+    const paymentId = String(payload.payment_id || payload.paymentId || '');
 
-    console.log('✅ IPN NowPayments validado:', {
-      payment_id,
-      payment_status,
-      order_id,
-      pay_currency,
-      pay_amount,
-      actually_paid,
-      price_amount,
-      price_currency
-    });
+    if (!orderId && !paymentId) {
+      console.warn('⚠️ Webhook NOWPayments sin order_id ni payment_id');
+      return res.json({ success: true });
+    }
 
-    // Actualizar la orden cripto en Supabase
-    if (order_id) {
+    // Buscar la orden en crypto_orders
+    let query = supabase.from('crypto_orders').select('*').limit(1);
+    if (orderId) query = query.eq('order_id', String(orderId));
+    else if (paymentId) query = query.eq('payment_id', paymentId);
+
+    const { data: rows, error: qErr } = await query;
+    if (qErr) {
+      console.error('❌ Error buscando crypto_orders en webhook:', qErr);
+      return res.status(500).json({ success: false });
+    }
+    if (!rows || rows.length === 0) {
+      console.warn('⚠️ crypto_orders no encontrado para order/payment', { orderId, paymentId });
+      return res.json({ success: true });
+    }
+
+    const order = rows[0];
+
+    // Actualizar info básica de pago
+    try {
+      const update = {
+        payment_id: paymentId || order.payment_id,
+        payment_status: paymentStatus || order.payment_status,
+        status:
+          paymentStatus === 'finished' || paymentStatus === 'completed' || paymentStatus === 'confirmed'
+            ? 'paid'
+            : paymentStatus || order.status,
+        price_amount: payload.price_amount ?? order.price_amount,
+        price_currency: payload.price_currency ?? order.price_currency,
+        pay_currency: payload.pay_currency ?? order.pay_currency,
+        pay_amount: payload.pay_amount ?? order.pay_amount,
+        actually_paid: payload.actually_paid ?? order.actually_paid,
+        updated_at: new Date().toISOString()
+      };
+      const { error: upErr } = await supabase.from('crypto_orders').update(update).eq('id', order.id);
+      if (upErr) console.error('❌ Error actualizando crypto_orders (webhook):', upErr);
+    } catch (err) {
+      console.error('❌ Error inesperado update crypto_orders (webhook):', err);
+    }
+
+    // Si ya se envió el welcome, no repetir aunque lleguen más webhooks
+    if (order.welcome_sent) {
+      return res.json({ success: true });
+    }
+
+    // Sólo cuando el pago está completado
+    if (paymentStatus === 'finished' || paymentStatus === 'completed' || paymentStatus === 'confirmed') {
       try {
-        const { data: orders, error: getErr } = await supabase
-          .from('crypto_orders')
-          .select('*')
-          .eq('order_id', order_id)
-          .limit(1);
-
-        if (getErr) {
-          console.error('❌ Error buscando crypto_orders en webhook:', getErr);
-        } else if (orders && orders.length > 0) {
-          const order = orders[0];
-
-          const updates = {
-            payment_id,
-            payment_status,
-            pay_currency,
-            pay_amount,
-            actually_paid,
-            price_amount,
-            price_currency,
-            updated_at: new Date().toISOString()
-          };
-
-          // Marcar como pagado si el status es exitoso
-          const successStatuses = ['finished', 'confirmed', 'completed'];
-          if (successStatuses.includes((payment_status || '').toLowerCase())) {
-            updates.status = 'paid';
-          }
-
-          const { error: updErr } = await supabase
-            .from('crypto_orders')
-            .update(updates)
-            .eq('order_id', order_id);
-          if (updErr) {
-            console.error('❌ Error actualizando crypto_orders en webhook:', updErr);
-          } else {
-            console.log('✅ crypto_orders actualizado para order_id:', order_id);
-          }
-
-          // Si está pagado y aún no se envió el welcome, creamos claim y mandamos email
-          if (
-            successStatuses.includes((payment_status || '').toLowerCase()) &&
-            !order.welcome_sent &&
-            order.email
-          ) {
-            try {
-              await sendWelcomeEmail(
-                order.email,
-                order.user_name || '',
-                order.plan_id || '',
-                null,
-                null,
-                { source: 'nowpayments_webhook', payment_id },
-                null
-              );
-
-              const { error: updWelcomeErr } = await supabase
-                .from('crypto_orders')
-                .update({ welcome_sent: true, updated_at: new Date().toISOString() })
-                .eq('order_id', order_id);
-              if (updWelcomeErr) {
-                console.error('❌ Error marcando welcome_sent en crypto_orders:', updWelcomeErr);
-              } else {
-                console.log('✅ Welcome email enviado por CRYPTO y welcome_sent=true para order_id:', order_id);
-              }
-            } catch (mailErr) {
-              console.error('❌ Error enviando welcome desde webhook NOWPayments:', mailErr);
-            }
-          }
+        const botPlanId = mapToBotPlanId(order.plan_id, order.product_name) || order.plan_id;
+        if (!botPlanId) {
+          console.warn('⚠️ No se pudo determinar botPlanId en webhook, se omite email/claim');
         } else {
-          console.warn('⚠️ IPN NowPayments con order_id desconocido:', order_id);
+          const email = order.email;
+          const name = order.user_name || order.email || 'usuario';
+
+          // Crear claim específico para CRIPTO (sin tarjeta)
+          const token = await createCryptoClaimToken({
+            email,
+            name,
+            plan_id: botPlanId,
+            extra: {
+              source: 'crypto_nowpayments',
+              crypto_order_id: order.id,
+              order_id: order.order_id,
+              payment_id: paymentId,
+              raw: payload
+            }
+          });
+
+          // Enviar correo usando ese mismo token (no crea claim de nuevo)
+          await sendWelcomeEmail(
+            email,
+            name,
+            botPlanId,
+            null,
+            null,
+            {
+              source: 'crypto_nowpayments',
+              crypto_order_id: order.id,
+              order_id: order.order_id,
+              payment_id: paymentId
+            },
+            token
+          );
+
+          // Marcar welcome_sent para no repetir
+          const { error: wsErr } = await supabase
+            .from('crypto_orders')
+            .update({ welcome_sent: true, updated_at: new Date().toISOString() })
+            .eq('id', order.id);
+          if (wsErr) console.error('❌ Error marcando welcome_sent en crypto_orders:', wsErr);
         }
-      } catch (dbErr) {
-        console.error('❌ Error global procesando crypto_orders en webhook:', dbErr);
+      } catch (err) {
+        console.error('❌ Error procesando flujo de bienvenida CRYPTO:', err);
       }
     }
 
-    return res.json({ success: true });
+    // Respond 200 para confirmar recepción
+    res.json({ success: true });
   } catch (err) {
     console.error('Error en webhook nowpayments:', err);
-    return res.status(500).json({ error: 'internal' });
+    res.status(500).json({ error: 'internal' });
   }
 });
 
