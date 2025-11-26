@@ -1,6 +1,8 @@
 // index.js - NAZA (completo)
 // Requisitos: Node >=18, @sendgrid/mail, @supabase/supabase-js, braintree, discord.js
 
+require('dotenv').config();
+
 const express = require('express');
 const braintree = require('braintree');
 const { Client, GatewayIntentBits } = require('discord.js');
@@ -38,6 +40,13 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const BOT_URL = process.env.BOT_URL || BASE_URL; // URL pública de tu bot para links
 const FRONTEND_URL = process.env.FRONTEND_URL || ''; // opcional
 
+// NOWPayments config (nuevas vars necesarias)
+const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || '';
+const CPLAN_ID_MENSUALNOW = process.env.CPLAN_ID_MENSUALNOW || '';
+const CPLAN_ID_TRIMESTRALNOW = process.env.CPLAN_ID_TRIMESTRALNOW || '';
+const CPLAN_ID_ANUALNOW = process.env.CPLAN_ID_ANUALNOW || '';
+const NOWPAYMENTS_API_URL = 'https://api.nowpayments.io/v1';
+
 // ============================================
 // CONFIGURAR SENDGRID
 if (!SENDGRID_API_KEY) {
@@ -58,10 +67,14 @@ const gateway = new braintree.BraintreeGateway({
 // ============================================
 // DISCORD CLIENT
 const discordClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
-discordClient.login(DISCORD_BOT_TOKEN);
-discordClient.once('ready', () => {
-  console.log('✅ Discord bot conectado:', discordClient.user?.tag || '(sin tag aún)');
-});
+if (DISCORD_BOT_TOKEN) {
+  discordClient.login(DISCORD_BOT_TOKEN).catch(err => console.warn('Discord login error:', err));
+  discordClient.once('ready', () => {
+    console.log('✅ Discord bot conectado:', discordClient.user?.tag || '(sin tag aún)');
+  });
+} else {
+  console.warn('⚠️ DISCORD_BOT_TOKEN no definido. No se podrá asignar roles en Discord.');
+}
 
 // ============================================
 // SUPABASE CLIENT
@@ -90,6 +103,113 @@ function getRoleIdForPlan(planId) {
   const roleId = mapping[planId];
   console.log('🎯 getRoleIdForPlan:', { planId, roleId });
   return roleId || ROLE_ID_SENALESDISCORD;
+}
+
+// ============================================
+// --- NUEVAS FUNCIONES: DETECCIÓN Y NOWPAYMENTS (NO INVADEN funciones existentes) ---
+
+/**
+ * Normaliza texto: minúsculas, sin acentos, sustituye ñ por n
+ */
+function normalize(str = '') {
+  return String(str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // quita acentos
+    .replace(/ñ/g, 'n');
+}
+
+/**
+ * Resolve CPLAN_ID_* (valor de env) según plan_id o product_name.
+ * Retorna el valor de la env (string) o null.
+ *
+ * Reglas (por tu orden):
+ * - Si aparece 'mensual' / 'senales' -> CPLAN_ID_MENSUALNOW
+ * - Si aparece 'trimestral' / 'desde cero' -> CPLAN_ID_TRIMESTRALNOW
+ * - Si aparece 'anual' / 'educacion total' -> CPLAN_ID_ANUALNOW
+ */
+function resolveNowPlanId(plan_id, product_name) {
+  const haystack = normalize(`${plan_id || ''} ${product_name || ''}`);
+
+  // ANUAL
+  if (
+    haystack.includes('plan_anual') ||
+    haystack.includes('anual') ||
+    haystack.includes('educacion total') ||
+    haystack.includes('educacion completa') ||
+    haystack.includes('educaciontotal') ||
+    haystack.includes('total')
+  ) {
+    return CPLAN_ID_ANUALNOW || null;
+  }
+
+  // TRIMESTRAL / "desde cero"
+  if (
+    haystack.includes('plan_trimestral') ||
+    haystack.includes('trimestral') ||
+    haystack.includes('educacion desde 0') ||
+    haystack.includes('educacion desde cero') ||
+    haystack.includes('desde cero') ||
+    haystack.includes('desde0')
+  ) {
+    return CPLAN_ID_TRIMESTRALNOW || null;
+  }
+
+  // MENSUAL / SENALES
+  if (
+    haystack.includes('plan_mensual') ||
+    haystack.includes('mensual') ||
+    haystack.includes('senales') ||
+    haystack.includes('senal') ||
+    haystack.includes('mensual-senales')
+  ) {
+    return CPLAN_ID_MENSUALNOW || null;
+  }
+
+  return null;
+}
+
+/**
+ * Crea un payment/invoice en NOWPayments usando product_id (CPLAN_ID_*).
+ * - Intenta usar product_id si está presente (recomendado).
+ * - Si product_id no está configurado, usa price_amount (fallback clásico).
+ *
+ * Retorna el JSON de respuesta de NOWPayments.
+ */
+async function createNowPaymentsOrder({ productId, amountUsd, orderId, description, customerEmail }) {
+  if (!NOWPAYMENTS_API_KEY) throw new Error('NOWPAYMENTS_API_KEY no definida en env');
+
+  const body = {
+    // price_amount puede ser opcional si productId apunta a un producto configurado en NowPayments
+    ...(amountUsd ? { price_amount: amountUsd, price_currency: 'usd' } : {}),
+    // pay_currency null para permitir que el usuario elija
+    pay_currency: null,
+    // si tienes productId (CPLAN_ID_*), pásalo
+    ...(productId ? { product_id: String(productId) } : {}),
+    order_id: String(orderId || `order-${Date.now()}`),
+    order_description: description || 'Pago NAZA',
+    success_url: process.env.SUCCESS_URL || `${BASE_URL}/gracias`,
+    cancel_url: process.env.CANCEL_URL || `${BASE_URL}/cancelado`,
+    customer_email: customerEmail || undefined
+  };
+
+  const resp = await fetch(`${NOWPAYMENTS_API_URL}/payment`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': NOWPAYMENTS_API_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    console.error('NOWPayments error', resp.status, data);
+    const message = data && data.message ? data.message : `Error creando pago NOWPayments (status ${resp.status})`;
+    throw new Error(message);
+  }
+
+  return data;
 }
 
 // ============================================
@@ -547,13 +667,72 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 }
 
 // ============================================
-// ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND (mantenido)
+// ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND (mantenido + RUTA CRYPTO AÑADIDA)
 // Ahora: generamos el claimToken con createClaimToken y lo usamos COMO state.
 // También guardamos los datos en pendingAuths usando el token como key.
 // De este modo el token que llega en el correo es el mismo que se usa como state para OAuth2.
 app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
   console.log('📬 POST /api/frontend/confirm');
   try {
+    // Nuevo: si frontend marca payment_method === 'crypto', manejamos CRYPTO aquí y salimos.
+    const { payment_method } = req.body || {};
+    if (payment_method && String(payment_method).toLowerCase() === 'crypto') {
+      console.log('🔔 /api/frontend/confirm -> flujo CRYPTO detectado');
+
+      const { plan_id, product_name, email, user_name, membership_id } = req.body || {};
+      // validar campos mínimos
+      if (!email || (!plan_id && !product_name)) {
+        return res.status(400).json({ success: false, message: 'Faltan datos requeridos para cripto: email y plan/product_name' });
+      }
+
+      // Resolver CPLAN_ID_* basado en plan_id o product_name
+      const nowProductId = resolveNowPlanId(plan_id, product_name);
+      if (!nowProductId) {
+        return res.status(400).json({ success: false, message: 'No se pudo identificar el plan cripto (mensual/trimestral/anual). Revisa plan_id o product_name.' });
+      }
+
+      // Monto fallback (si tu NowPayments usa product_id con precio configurado, puedes omitir priceAmount)
+      // Ajusta estos montos si los tuyos son distintos
+      let amountUsd = null;
+      if (nowProductId === CPLAN_ID_MENSUALNOW) amountUsd = 19;
+      if (nowProductId === CPLAN_ID_TRIMESTRALNOW) amountUsd = 119;
+      if (nowProductId === CPLAN_ID_ANUALNOW) amountUsd = 390;
+
+      // Generar orderId único
+      const orderId = `${nowProductId}-${membership_id || 'guest'}-${Date.now()}`;
+
+      // Crear orden/pago en NOWPayments
+      let paymentResp = null;
+      try {
+        paymentResp = await createNowPaymentsOrder({
+          productId: nowProductId,
+          amountUsd,
+          orderId,
+          description: product_name || plan_id || 'Pago NAZA (cripto)',
+          customerEmail: email
+        });
+      } catch (err) {
+        console.error('❌ Error creando orden NowPayments:', err.message || err);
+        return res.status(500).json({ success: false, message: 'Error creando pago cripto', detail: err.message || String(err) });
+      }
+
+      // extraer la URL de pago (varios campos posibles segun respuesta)
+      const redirectUrl = paymentResp?.invoice_url || paymentResp?.payment_url || paymentResp?.url || paymentResp?.payment_link || paymentResp?.redirect_url || null;
+      console.log('NowPayments response (crypto):', { productId: nowProductId, orderId, redirectUrl });
+
+      // Opcional: guarda registro en supabase o logs (no obligatorio aquí)
+
+      if (redirectUrl) {
+        return res.json({ success: true, redirect: redirectUrl, now_product_id: nowProductId, order: orderId });
+      } else {
+        // si no vino redirect pero OK, devolver objeto para debug
+        return res.json({ success: true, payment: paymentResp, now_product_id: nowProductId, order: orderId });
+      }
+    }
+
+    // ------------------------------
+    // LÓGICA EXISTENTE (NO MODIFICAR) - flujo de tarjeta sigue como estaba
+    // ------------------------------
     const { nonce, email, name, plan_id } = req.body;
     console.log('📦 Datos recibidos:', { nonce: nonce ? 'SÍ' : 'NO', email, name, plan_id });
     if (!nonce || !email || !name || !plan_id) {
@@ -816,6 +995,26 @@ app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-u
   } catch (error) {
     console.error('❌ Error procesando webhook:', error);
     res.sendStatus(500);
+  }
+});
+
+// ============================================
+// OPTIONAL: webhook endpoint for NowPayments (si decides activarlo en el dashboard)
+// (Verifica con NOWPayments docs si quieres validar firma HMAC o token)
+app.post('/api/nowpayments/webhook', express.json({ type: '*/*' }), async (req, res) => {
+  try {
+    console.log('📬 NowPayments webhook received:', req.body);
+    // Aquí puedes validar la firma si NOWPAYMENTS provee X-Signature header (opcional)
+    // Ejemplo: if (process.env.NOWPAYMENTS_WEBHOOK_SECRET) { ...validate HMAC... }
+
+    // Procesa el objeto segun tu lógica: actualizar orden, marcar como pagado, etc.
+    // req.body tiene fields como: payment_status, payment_id, order_id, price_amount, pay_currency, etc.
+
+    // Respond 200 para confirmar recepción
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error en webhook nowpayments:', err);
+    res.status(500).json({ error: 'internal' });
   }
 });
 
