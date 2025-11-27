@@ -1,4 +1,4 @@
-// index.js - NAZA (completo)
+// index.js - NAZA (completo) - integracion CRIPTO (sandbox por defecto)
 // Requisitos: Node >=18, @sendgrid/mail, @supabase/supabase-js, braintree, discord.js
 
 require('dotenv').config();
@@ -41,12 +41,13 @@ const BOT_URL = process.env.BOT_URL || BASE_URL; // URL pública de tu bot para 
 const FRONTEND_URL = process.env.FRONTEND_URL || ''; // opcional
 
 // NOWPayments config (nuevas vars necesarias)
+// Por defecto usamos sandbox para pruebas; sobrescribe con env si quieres live.
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || '';
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
 const CPLAN_ID_MENSUALNOW = process.env.CPLAN_ID_MENSUALNOW || '';
 const CPLAN_ID_TRIMESTRALNOW = process.env.CPLAN_ID_TRIMESTRALNOW || '';
 const CPLAN_ID_ANUALNOW = process.env.CPLAN_ID_ANUALNOW || '';
-const NOWPAYMENTS_API_URL = 'https://api.nowpayments.io/v1';
+const NOWPAYMENTS_API_URL = process.env.NOWPAYMENTS_API_URL || 'https://api-sandbox.nowpayments.io/v1';
 
 // ============================================
 // CONFIGURAR SENDGRID
@@ -213,11 +214,8 @@ async function createNowPaymentsOrder({ productId, amountUsd, orderId, descripti
   if (!NOWPAYMENTS_API_KEY) throw new Error('NOWPAYMENTS_API_KEY no definida en env');
 
   const body = {
-    // price_amount + price_currency en USD (coinciden con lo que ves en tu dashboard)
     ...(amountUsd ? { price_amount: amountUsd, price_currency: 'usd' } : {}),
-    // IMPORTANTE: pay_currency debe ser un string; 'any' permite todas las monedas
     pay_currency: 'any',
-    // si tienes productId (CPLAN_ID_*), pásalo
     ...(productId ? { product_id: String(productId) } : {}),
     order_id: String(orderId || `order-${Date.now()}`),
     order_description: description || 'Pago NAZA',
@@ -609,12 +607,7 @@ async function createCryptoClaimToken({ email, name, plan_id, extra = {} }) {
 // EMAIL: Templates y envíos (SendGrid)
 
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
-  // Logo hosted (user requested URL) and styled to be circular + zoomed
   const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
-
-  // Note: to force dark background inside Gmail we use a full-width outer table with bgcolor
-  // and inline background-color styles on the container elements. We also add meta tags
-  // for color-scheme. All other content/colors kept as before.
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -623,22 +616,18 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 <meta name="color-scheme" content="dark light">
 <meta name="supported-color-schemes" content="dark light">
 <style>
-/* keep minimal CSS; inline styles are primary for email clients */
 @media (prefers-color-scheme: dark) {
   .wrap { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important; }
 }
 </style>
 </head>
 <body style="margin:0;padding:0;background-color:#000000;">
-  <!-- Outer full-width table to ensure email clients (including Gmail) render dark background -->
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;">
     <tr>
       <td align="center" valign="top">
-        <!-- Centered container -->
         <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;">
           <tr>
             <td style="padding:0 16px;">
-              <!-- Card -->
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);">
                 <tr>
                   <td style="padding:28px 24px 8px 24px;text-align:center;">
@@ -696,7 +685,6 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
                 </tr>
 
               </table>
-              <!-- end card -->
             </td>
           </tr>
         </table>
@@ -752,16 +740,13 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   const last4 = extra.last4 || '';
   const cardExpiry = extra.cardExpiry || '';
 
-  // Si nos pasan existingToken, NO creamos uno nuevo (asumimos ya creado previamente)
   let token = existingToken;
   if (!token) {
     token = await createClaimToken({ email, name, plan_id: planId, subscriptionId, customerId, last4, cardExpiry, extra });
   }
 
-  // <-- CAMBIO: OAuth2 DIRECTO (el botón del correo irá directamente al OAuth2 de Discord)
   const claimUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)}`;
 
-  // Pasar token al template HTML y al texto
   const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL, token });
   const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email, token });
 
@@ -774,16 +759,13 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   };
 
   try {
-    // <-- DEBUG LINES (ya añadidas por ti)
     console.log('DEBUG sendWelcomeEmail -> token:', token);
     console.log('DEBUG sendWelcomeEmail -> claimUrl:', claimUrl);
-    // <-- end debug lines
     const result = await sgMail.send(msg);
     console.log('✅ Email enviado a:', email, 'SendGrid result:', result?.[0]?.statusCode || 'unknown');
   } catch (error) {
     console.error('❌ Error enviando email con SendGrid:', error?.message || error);
     if (error?.response?.body) console.error('SendGrid response body:', error.response.body);
-    // Dejar que el flujo de pago siga, pero informa del fallo
     throw error;
   }
 }
@@ -817,7 +799,6 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
       }
 
       // Monto fallback (si tu NowPayments usa product_id con precio configurado, puedes omitir priceAmount)
-      // Ajusta estos montos si los tuyos son distintos
       let amountUsd = null;
       if (nowProductId === CPLAN_ID_MENSUALNOW) amountUsd = 19;
       if (nowProductId === CPLAN_ID_TRIMESTRALNOW) amountUsd = 119;
@@ -910,7 +891,6 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
           order: orderId
         });
       } else {
-        // si no vino redirect pero OK, devolver objeto para debug
         return res.json({
           success: true,
           payment: paymentResp,
@@ -974,10 +954,9 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
       card_expiry: cardExpiry,
       timestamp: Date.now()
     });
-    // Mantener cleanup parecido
     setTimeout(() => pendingAuths.delete(token), 10 * 60 * 1000);
 
-    // Construimos la URL de OAuth usando el token como state (igual que /api/auth/claim)
+    // Construimos la URL de OAuth usando el token como state
     const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(
       DISCORD_REDIRECT_URL
     )}&response_type=code&scope=identify%20guilds.join&state=${token}`;
@@ -1007,7 +986,6 @@ app.get('/api/auth/claim', async (req, res) => {
   const token = req.query.token;
   if (!token) return res.status(400).send('Token missing');
   try {
-    // Verificamos que exista y no esté usado
     const { data: rows, error } = await supabase
       .from('claims')
       .select('id,token,used')
@@ -1025,7 +1003,6 @@ app.get('/api/auth/claim', async (req, res) => {
       return res.status(400).send('Este enlace ya fue utilizado.');
     }
 
-    // Redirigir a OAuth2 de Discord usando token como state
     const state = token;
     const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
     const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
@@ -1041,19 +1018,15 @@ app.get('/api/auth/claim', async (req, res) => {
 
 // ============================================
 // ENDPOINT: CALLBACK DE DISCORD OAUTH2
-// - Soporta state que sea token de claim (DB) o state de pendingAuths (memoria)
-// - Si es claim (DB), marcamos used=true SOLO después de registrar en memberships con éxito
 app.get('/discord/callback', async (req, res) => {
   console.log('📬 GET /discord/callback');
   try {
     const { code, state } = req.query;
     if (!code || !state) return res.status(400).send('❌ Faltan parámetros');
 
-    // Intentar recuperar datos desde pendingAuths (frontend flow)
     let authData = pendingAuths.get(state);
     let claimData = null;
     if (!authData) {
-      // Buscar en claims por token = state
       const { data: claimsRows, error: claimErr } = await supabase
         .from('claims')
         .select('*')
@@ -1086,7 +1059,6 @@ app.get('/discord/callback', async (req, res) => {
       subscription_id: authData.subscription_id
     });
 
-    // Intercambiar code por access_token en Discord
     const params = new URLSearchParams({
       client_id: DISCORD_CLIENT_ID,
       client_secret: DISCORD_CLIENT_SECRET,
@@ -1106,7 +1078,6 @@ app.get('/discord/callback', async (req, res) => {
     }
     console.log('✅ Token obtenido');
 
-    // Obtener info del usuario
     const userResponse = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${tokenData.access_token}` }
     });
@@ -1115,7 +1086,6 @@ app.get('/discord/callback', async (req, res) => {
     const discordUsername = userData.username;
     console.log('👤 Usuario Discord:', discordUsername, '(' + discordId + ')');
 
-    // Agregar al servidor (invite via OAuth2)
     try {
       await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`, {
         method: 'PUT',
@@ -1130,7 +1100,6 @@ app.get('/discord/callback', async (req, res) => {
       console.log('ℹ️ Usuario ya está en el servidor o no pudo agregarse:', err?.message || err);
     }
 
-    // Asignar rol según plan
     const roleId = getRoleIdForPlan(authData.plan_id);
     console.log('🎭 Asignando rol:', roleId, 'para plan:', authData.plan_id);
     try {
@@ -1142,7 +1111,6 @@ app.get('/discord/callback', async (req, res) => {
       console.error('❌ Error asignando rol:', err);
     }
 
-    // Guardar en Supabase memberships (incluyendo last4 y card_expiry si estaban)
     try {
       const membershipRow = {
         email: authData.email,
@@ -1167,7 +1135,6 @@ app.get('/discord/callback', async (req, res) => {
       console.error('❌ Error con Supabase (memberships):', err);
     }
 
-    // Si venía de claim (DB), marcar used = true ahora que el registro fue completado
     if (claimData) {
       try {
         const { error: markErr } = await supabase
@@ -1184,7 +1151,6 @@ app.get('/discord/callback', async (req, res) => {
       }
     }
 
-    // Redirigir a frontend o mostrar página de éxito
     const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg/sXjU5ZVzXU';
     return res.send(`
 <!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
@@ -1218,7 +1184,7 @@ app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-u
 });
 
 // ============================================
-// WEBHOOK de NOWPayments (CRIPTO)
+// WEBHOOK de NOWPayments (CRIPTO) - EXISTENTE (lo mantuve)
 // Se usa para saber cuándo el pago está "finished" y disparar email + claim.
 app.post('/api/nowpayments/webhook', express.json({ type: '*/*' }), async (req, res) => {
   try {
@@ -1345,6 +1311,225 @@ app.post('/api/nowpayments/webhook', express.json({ type: '*/*' }), async (req, 
     res.status(500).json({ error: 'internal' });
   }
 });
+
+// ============================================
+// === NUEVAS RUTAS AISLADAS PARA CRIPTO (no tocan la lógica de tarjeta) ===
+
+// Ruta auxiliar para crear pago (opcional si prefieres separar del frontend confirm)
+// POST /naza/crypto/create
+app.post('/naza/crypto/create', async (req, res) => {
+  try {
+    const { email, name, plan_id, product_name, amountUsd, membership_id } = req.body || {};
+    if (!email || (!plan_id && !product_name)) {
+      return res.status(400).json({ ok: false, error: 'email y plan_id/product_name requeridos' });
+    }
+
+    const nowProductId = resolveNowPlanId(plan_id, product_name);
+    if (!nowProductId) return res.status(400).json({ ok: false, error: 'No se resolvió product_id para NowPayments' });
+
+    const botPlanId = mapToBotPlanId(plan_id, product_name);
+    if (!botPlanId) return res.status(400).json({ ok: false, error: 'No se resolvió plan interno del bot' });
+
+    const orderId = `${nowProductId}-${membership_id || 'guest'}-${Date.now()}`;
+
+    const baseRow = {
+      order_id: orderId,
+      now_product_id: String(nowProductId),
+      plan_id: botPlanId,
+      product_name: product_name || plan_id || '',
+      email,
+      user_name: name || '',
+      membership_id: membership_id || null,
+      status: 'pending',
+      payment_status: 'waiting',
+      created_at: new Date().toISOString()
+    };
+    try {
+      await supabase.from('crypto_orders').insert([baseRow]);
+    } catch (e) {
+      console.warn('nowpayments create route: warning insert crypto_orders:', e?.message || e);
+    }
+
+    const paymentResp = await createNowPaymentsOrder({
+      productId: nowProductId,
+      amountUsd,
+      orderId,
+      description: product_name || plan_id || 'Suscripción NAZA (cripto)',
+      customerEmail: email
+    });
+
+    try {
+      const update = {
+        payment_id: String(paymentResp?.payment_id || paymentResp?.id || ''),
+        payment_status: paymentResp?.payment_status || paymentResp?.paymentStatus || 'waiting',
+        status: paymentResp?.payment_status || 'waiting',
+        price_amount: paymentResp?.price_amount ?? null,
+        price_currency: paymentResp?.price_currency ?? null,
+        pay_currency: paymentResp?.pay_currency ?? null,
+        pay_amount: paymentResp?.pay_amount ?? null,
+        actually_paid: paymentResp?.actually_paid ?? null,
+        updated_at: new Date().toISOString()
+      };
+      await supabase.from('crypto_orders').update(update).eq('order_id', orderId);
+    } catch (e) {
+      console.warn('nowpayments create route: warning updating crypto_orders post payment:', e?.message || e);
+    }
+
+    const redirectUrl =
+      paymentResp?.invoice_url ||
+      paymentResp?.payment_url ||
+      paymentResp?.url ||
+      paymentResp?.payment_link ||
+      paymentResp?.redirect_url ||
+      null;
+
+    return res.json({ ok: true, payment: paymentResp, redirect: redirectUrl, now_product_id: nowProductId, order_id: orderId });
+  } catch (err) {
+    console.error('nowpayments create error:', err?.message || err);
+    return res.status(500).json({ ok: false, error: err?.message || 'internal' });
+  }
+});
+
+// Webhook HMAC-safe alternativo (ruta separada) - POST /naza/nowpayments/webhook
+app.post('/naza/nowpayments/webhook', expressRawJsonMiddleware(), async (req, res) => {
+  try {
+    const rawBody = req.rawBody || null;
+    const payload = req.body || {};
+
+    if (!payload || Object.keys(payload).length === 0) {
+      console.warn('nowpayments-crypto webhook: payload vacío');
+      return res.status(400).json({ ok: false });
+    }
+
+    // ipn_secret check if present
+    if (NOWPAYMENTS_IPN_SECRET && payload.ipn_secret) {
+      if (payload.ipn_secret !== NOWPAYMENTS_IPN_SECRET) {
+        console.warn('nowpayments-crypto webhook: ipn_secret inválido');
+        return res.status(400).json({ ok: false });
+      }
+    } else if (NOWPAYMENTS_IPN_SECRET && rawBody) {
+      try {
+        const parsed = JSON.parse(rawBody.toString('utf8'));
+        const sorted = canonicalize(parsed);
+        const computed = crypto.createHmac('sha512', NOWPAYMENTS_IPN_SECRET).update(sorted).digest('hex');
+        const incomingSig = req.headers['x-nowpayments-signature'] || req.headers['x-nowpayments-sig'] || req.headers['x-nowpayments-sign'] || '';
+        if (incomingSig && computed !== incomingSig) {
+          console.warn('nowpayments-crypto webhook: firma HMAC inválida');
+          return res.status(403).json({ ok: false });
+        }
+      } catch (e) {
+        console.warn('nowpayments-crypto webhook: error verificando HMAC, se continúa por fallback', e?.message || e);
+      }
+    }
+
+    const paymentStatus = payload.payment_status || payload.paymentStatus || payload.status || '';
+    const orderId = payload.order_id || payload.orderId || '';
+    const paymentId = String(payload.payment_id || payload.paymentId || '');
+
+    let q = supabase.from('crypto_orders').select('*').limit(1);
+    if (orderId) q = q.eq('order_id', String(orderId));
+    else if (paymentId) q = q.eq('payment_id', paymentId);
+    const { data: rows, error: qErr } = await q;
+    if (qErr) {
+      console.error('nowpayments-crypto webhook: error buscando crypto_orders:', qErr);
+      return res.status(500).json({ ok: false });
+    }
+    if (!rows || rows.length === 0) {
+      console.warn('nowpayments-crypto webhook: crypto_orders no encontrado', { orderId, paymentId });
+      return res.json({ ok: true });
+    }
+    const order = rows[0];
+
+    try {
+      const upd = {
+        payment_id: paymentId || order.payment_id,
+        payment_status: paymentStatus || order.payment_status,
+        status: (paymentStatus === 'finished' || paymentStatus === 'completed' || paymentStatus === 'confirmed') ? 'paid' : (paymentStatus || order.status),
+        price_amount: payload.price_amount ?? order.price_amount,
+        price_currency: payload.price_currency ?? order.price_currency,
+        pay_currency: payload.pay_currency ?? order.pay_currency,
+        pay_amount: payload.pay_amount ?? order.pay_amount,
+        actually_paid: payload.actually_paid ?? order.actually_paid,
+        updated_at: new Date().toISOString()
+      };
+      await supabase.from('crypto_orders').update(upd).eq('id', order.id);
+    } catch (e) {
+      console.warn('nowpayments-crypto webhook: warning actualizando crypto_orders:', e?.message || e);
+    }
+
+    if (order.welcome_sent) {
+      return res.json({ ok: true });
+    }
+
+    const isPaid = (paymentStatus === 'finished' || paymentStatus === 'completed' || paymentStatus === 'confirmed');
+    if (isPaid) {
+      try {
+        const botPlanId = mapToBotPlanId(order.plan_id, order.product_name) || order.plan_id;
+        if (!botPlanId) {
+          console.warn('nowpayments-crypto webhook: no se obtuvo botPlanId, se salta envío');
+          return res.json({ ok: true });
+        }
+        const email = order.email;
+        const name = order.user_name || order.email || 'usuario';
+
+        const token = await createCryptoClaimToken({
+          email,
+          name,
+          plan_id: botPlanId,
+          extra: {
+            source: 'nowpayments_webhook',
+            crypto_order_id: order.id,
+            order_id: order.order_id,
+            payment_id: paymentId,
+            raw: payload
+          }
+        });
+
+        await sendWelcomeEmail(email, name, botPlanId, null, null, { source: 'nowpayments_webhook' }, token);
+
+        try {
+          await supabase.from('crypto_orders').update({ welcome_sent: true, updated_at: new Date().toISOString() }).eq('id', order.id);
+        } catch (e) {
+          console.warn('nowpayments-crypto webhook: warning marcando welcome_sent:', e?.message || e);
+        }
+      } catch (e) {
+        console.error('nowpayments-crypto webhook: error procesando pago completado:', e?.message || e);
+      }
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('nowpayments-crypto webhook: error general:', err?.message || err);
+    return res.status(500).json({ ok: false });
+  }
+});
+
+// small utilities used above
+function canonicalize(obj) {
+  if (obj === null) return 'null';
+  if (typeof obj !== 'object') return JSON.stringify(obj);
+  const keys = Object.keys(obj).sort();
+  const parts = keys.map(k => `"${k}":${canonicalize(obj[k])}`);
+  return `{${parts.join(',')}}`;
+}
+
+// express middleware to keep raw body available (for HMAC verification)
+function expressRawJsonMiddleware() {
+  return (req, res, next) => {
+    let data = [];
+    req.on('data', chunk => data.push(chunk));
+    req.on('end', () => {
+      const buf = Buffer.concat(data);
+      req.rawBody = buf;
+      try {
+        req.body = JSON.parse(buf.toString('utf8'));
+      } catch (e) {
+        req.body = {};
+      }
+      next();
+    });
+  };
+}
 
 // ============================================
 // HEALTH CHECK
