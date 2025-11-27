@@ -38,22 +38,6 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const BOT_URL = process.env.BOT_URL || BASE_URL; // URL pública de tu bot para links
 const FRONTEND_URL = process.env.FRONTEND_URL || ''; // opcional
 
-// NOWPAYMENTS (cripto)
-const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || ''; // opcional (firma IPN)
-const NOWPAYMENTS_MIN_LOG_LEVEL = process.env.NOWPAYMENTS_MIN_LOG_LEVEL || 'info';
-
-// IDs numéricos de planes de NOWPayments (los que viste en el panel)
-const CPLAN_ID_ANUALNOW = process.env.CPLAN_ID_ANUALNOW || '796655126';
-const CPLAN_ID_MENSUALNOW = process.env.CPLAN_ID_MENSUALNOW || '1375179357';
-const CPLAN_ID_TRIMESTRALNOW = process.env.CPLAN_ID_TRIMESTRALNOW || '335904819';
-
-// Mapeo: id de NOWPayments -> plan interno
-const NOWPAYMENT_PLAN_MAP = {
-  [CPLAN_ID_ANUALNOW]: 'plan_anual',
-  [CPLAN_ID_MENSUALNOW]: 'plan_mensual',
-  [CPLAN_ID_TRIMESTRALNOW]: 'plan_trimestral'
-};
-
 // ============================================
 // CONFIGURAR SENDGRID
 if (!SENDGRID_API_KEY) {
@@ -106,24 +90,6 @@ function getRoleIdForPlan(planId) {
   const roleId = mapping[planId];
   console.log('🎯 getRoleIdForPlan:', { planId, roleId });
   return roleId || ROLE_ID_SENALESDISCORD;
-}
-
-// MAPEO DE PLANES A DURACIÓN (DÍAS) PARA CRIPTO
-function getPlanDurationDays(planId) {
-  if (!planId) return null;
-  const id = String(planId).toLowerCase();
-
-  // IDs principales
-  if (id === 'plan_mensual' || id.includes('mensual') || id.includes('signals_30') || id.includes('señales') || id.includes('senales_30')) {
-    return 30;
-  }
-  if (id === 'plan_trimestral' || id.includes('trimestral') || id.includes('educacion_desde_cero') || id.includes('educación desde cero') || id.includes('education_90')) {
-    return 90;
-  }
-  if (id === 'plan_anual' || id.includes('anual') || id.includes('educacion_total') || id.includes('educación total') || id.includes('education_365')) {
-    return 365;
-  }
-  return null;
 }
 
 // ============================================
@@ -314,32 +280,33 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   }
 
   // 3) Verificar uso de la tarjeta (no permitir >2 correos distintos)
-  // IMPORTANTE: esto solo aplica si tenemos last4 Y cardExpiry (tarjetas).
   try {
-    if (last4 && cardExpiry) {
-      const [{ data: mRows, error: mErr }, { data: cRows, error: cErr }] = await Promise.all([
-        supabase.from('memberships').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || ''),
-        supabase.from('claims').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || '')
-      ]);
-      if (mErr) {
-        console.error('Error consultando memberships por tarjeta:', mErr);
-      }
-      if (cErr) {
-        console.error('Error consultando claims por tarjeta:', cErr);
-      }
-      const distinctEmails = new Set();
-      (mRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
-      (cRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
-      distinctEmails.delete('');
-      if (distinctEmails.size >= 2 && !distinctEmails.has(email)) {
-        throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.');
-      }
+    // obtener emails distintos tanto de memberships como de claims usando esa tarjeta
+    const [{ data: mRows, error: mErr }, { data: cRows, error: cErr }] = await Promise.all([
+      supabase.from('memberships').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || ''),
+      supabase.from('claims').select('email').eq('last4', last4 || '').eq('card_expiry', cardExpiry || '')
+    ]);
+    if (mErr) {
+      console.error('Error consultando memberships por tarjeta:', mErr);
+      // no abortar aún, continuamos con lo que tengamos
+    }
+    if (cErr) {
+      console.error('Error consultando claims por tarjeta:', cErr);
+    }
+    const distinctEmails = new Set();
+    (mRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
+    (cRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
+    distinctEmails.delete('');
+    // Si ya hay 2 o más emails distintos usando esa tarjeta --> bloquear
+    if (distinctEmails.size >= 2 && !distinctEmails.has(email)) {
+      throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.');
     }
   } catch (err) {
     throw err;
   }
 
   // 3b) (Recheck race-condition): asegurar que entre la verificación y el insert no apareció otro claim/membership
+  // Esto es una segunda verificación inmediata antes del insert.
   try {
     const [{ data: recheckMembership, error: rMemErr }, { data: recheckClaim, error: rClaimErr }] = await Promise.all([
       supabase.from('memberships').select('id').eq('email', email).limit(1),
@@ -384,6 +351,7 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
       .insert([row]);
     if (insertErr) {
       console.error('Error insertando claim:', insertErr);
+      // En caso de conflicto por unique constraint en email o token, devolver mensaje amigable
       throw new Error('No se pudo crear el claim');
     }
     return token;
@@ -396,10 +364,15 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 // EMAIL: Templates y envíos (SendGrid)
 // Nota: sendWelcomeEmail ahora acepta un token opcional existingToken. Si se pasa, usa ese token
 // (evita crear un claim duplicado). Si no se pasa, crea el claim como antes.
+// REEMPLAZADO: buildWelcomeEmailHtml ahora usa un enfoque compatible con Gmail para fondo oscuro
 
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
+  // Logo hosted (user requested URL) and styled to be circular + zoomed
   const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
 
+  // Note: to force dark background inside Gmail we use a full-width outer table with bgcolor
+  // and inline background-color styles on the container elements. We also add meta tags
+  // for color-scheme. All other content/colors kept as before.
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -408,18 +381,22 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 <meta name="color-scheme" content="dark light">
 <meta name="supported-color-schemes" content="dark light">
 <style>
+/* keep minimal CSS; inline styles are primary for email clients */
 @media (prefers-color-scheme: dark) {
   .wrap { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important; }
 }
 </style>
 </head>
 <body style="margin:0;padding:0;background-color:#000000;">
+  <!-- Outer full-width table to ensure email clients (including Gmail) render dark background -->
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;">
     <tr>
       <td align="center" valign="top">
+        <!-- Centered container -->
         <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;">
           <tr>
             <td style="padding:0 16px;">
+              <!-- Card -->
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);">
                 <tr>
                   <td style="padding:28px 24px 8px 24px;text-align:center;">
@@ -477,6 +454,7 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
                 </tr>
 
               </table>
+              <!-- end card -->
             </td>
           </tr>
         </table>
@@ -538,8 +516,10 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
     token = await createClaimToken({ email, name, plan_id: planId, subscriptionId, customerId, last4, cardExpiry, extra });
   }
 
+  // <-- CAMBIO: OAuth2 DIRECTO (el botón del correo irá directamente al OAuth2 de Discord)
   const claimUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)}`;
 
+  // Pasar token al template HTML y al texto
   const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL, token });
   const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email, token });
 
@@ -552,19 +532,25 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   };
 
   try {
+    // <-- DEBUG LINES (ya añadidas por ti)
     console.log('DEBUG sendWelcomeEmail -> token:', token);
     console.log('DEBUG sendWelcomeEmail -> claimUrl:', claimUrl);
+    // <-- end debug lines
     const result = await sgMail.send(msg);
     console.log('✅ Email enviado a:', email, 'SendGrid result:', result?.[0]?.statusCode || 'unknown');
   } catch (error) {
     console.error('❌ Error enviando email con SendGrid:', error?.message || error);
     if (error?.response?.body) console.error('SendGrid response body:', error.response.body);
+    // Dejar que el flujo de pago siga, pero informa del fallo
     throw error;
   }
 }
 
 // ============================================
-// ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND (tarjeta / Braintree)
+// ENDPOINT: CONFIRMAR PAGO DESDE FRONTEND (mantenido)
+// Ahora: generamos el claimToken con createClaimToken y lo usamos COMO state.
+// También guardamos los datos en pendingAuths usando el token como key.
+// De este modo el token que llega en el correo es el mismo que se usa como state para OAuth2.
 app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
   console.log('📬 POST /api/frontend/confirm');
   try {
@@ -582,7 +568,7 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     const paymentMethod = customerResult.customer.paymentMethods[0];
     const paymentMethodToken = paymentMethod.token;
     const last4 = paymentMethod.last4 || '';
-    const cardExpiry = paymentMethod.expirationDate || '';
+    const cardExpiry = paymentMethod.expirationDate || ''; // formato MM/YYYY o MM/YY
 
     const subscriptionResult = await gateway.subscription.create({
       paymentMethodToken: paymentMethodToken,
@@ -596,54 +582,22 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
     const customerId = customerResult.customer.id || null;
     console.log('✅ Suscripción creada:', subscriptionId, 'Customer ID:', customerId);
 
-    // Extra incluye metadata para diferenciar tarjeta
-    const extra = {
-      source: 'frontend_confirm',
-      payment_provider: 'braintree',
-      payment_method: 'card',
-      auto_renew: true
-    };
+    // En lugar de crear un state aleatorio, creamos el claim token y lo usamos como state
+    const token = await createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra: { source: 'frontend_confirm' } });
 
-    const token = await createClaimToken({
-      email,
-      name,
-      plan_id,
-      subscriptionId,
-      customerId,
-      last4,
-      cardExpiry,
-      extra
-    });
+    // Guardamos en pendingAuths usando el token como key para que /discord/callback lo reconozca
+    pendingAuths.set(token, { email, name, plan_id, subscription_id: subscriptionId, customer_id: customerId, last4, card_expiry: cardExpiry, timestamp: Date.now() });
+    // Mantener cleanup parecido
+    setTimeout(()=> pendingAuths.delete(token), 10 * 60 * 1000);
 
-    // Guardamos en pendingAuths usando el token como key
-    pendingAuths.set(token, {
-      email,
-      name,
-      plan_id,
-      subscription_id: subscriptionId,
-      customer_id: customerId,
-      last4,
-      card_expiry: cardExpiry,
-      payment_provider: 'braintree',
-      payment_method: 'card',
-      auto_renew: true,
-      timestamp: Date.now()
-    });
-    setTimeout(() => pendingAuths.delete(token), 10 * 60 * 1000);
-
+    // Construimos la URL de OAuth usando el token como state (igual que /api/auth/claim)
     const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${token}`;
 
-    // Enviar email con claim (misma metadata en extra)
-    sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { ...extra, last4, cardExpiry }, token)
+    // Enviar email con claim (usando el mismo token para evitar duplicados)
+    sendWelcomeEmail(email, name, plan_id, subscriptionId, customerId, { last4, cardExpiry, source: 'frontend_confirm' }, token)
       .catch(err => console.error('❌ Error al enviar email (background):', err));
 
-    return res.json({
-      success: true,
-      subscription_id: subscriptionId,
-      customer_id: customerId,
-      oauth_url: oauthUrl,
-      message: 'Suscripción creada. Recibirás un email con "Obtener acceso".'
-    });
+    return res.json({ success: true, subscription_id: subscriptionId, customer_id: customerId, oauth_url: oauthUrl, message: 'Suscripción creada. Recibirás un email con "Obtener acceso".' });
   } catch (error) {
     console.error('❌ Error en /api/frontend/confirm:', error);
     res.status(500).json({ success: false, message: error.message || 'Error interno' });
@@ -652,10 +606,12 @@ app.post('/api/frontend/confirm', authenticateFrontend, async (req, res) => {
 
 // ============================================
 // ENDPOINT: CLAIM (vía email)
+// NO marcamos used aquí — solo redirigimos a Discord. El token se marcará usado al completar /discord/callback
 app.get('/api/auth/claim', async (req, res) => {
   const token = req.query.token;
   if (!token) return res.status(400).send('Token missing');
   try {
+    // Verificamos que exista y no esté usado
     const { data: rows, error } = await supabase
       .from('claims')
       .select('id,token,used')
@@ -673,6 +629,7 @@ app.get('/api/auth/claim', async (req, res) => {
       return res.status(400).send('Este enlace ya fue utilizado.');
     }
 
+    // Redirigir a OAuth2 de Discord usando token como state
     const state = token;
     const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
     const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
@@ -688,16 +645,19 @@ app.get('/api/auth/claim', async (req, res) => {
 
 // ============================================
 // ENDPOINT: CALLBACK DE DISCORD OAUTH2
+// - Soporta state que sea token de claim (DB) o state de pendingAuths (memoria)
+// - Si es claim (DB), marcamos used=true SOLO después de registrar en memberships con éxito
 app.get('/discord/callback', async (req, res) => {
   console.log('📬 GET /discord/callback');
   try {
     const { code, state } = req.query;
     if (!code || !state) return res.status(400).send('❌ Faltan parámetros');
 
+    // Intentar recuperar datos desde pendingAuths (frontend flow)
     let authData = pendingAuths.get(state);
     let claimData = null;
-
     if (!authData) {
+      // Buscar en claims por token = state
       const { data: claimsRows, error: claimErr } = await supabase
         .from('claims')
         .select('*')
@@ -710,14 +670,6 @@ app.get('/discord/callback', async (req, res) => {
         if (claimData.used) {
           return res.status(400).send('Este enlace ya fue usado.');
         }
-        let extraParsed = {};
-        if (claimData.extra) {
-          try {
-            extraParsed = JSON.parse(claimData.extra);
-          } catch (e) {
-            console.warn('⚠️ No se pudo parsear extra en claimData:', e.message);
-          }
-        }
         authData = {
           email: claimData.email,
           name: claimData.name,
@@ -725,26 +677,16 @@ app.get('/discord/callback', async (req, res) => {
           subscription_id: claimData.subscription_id,
           customer_id: claimData.customer_id,
           last4: claimData.last4,
-          card_expiry: claimData.card_expiry,
-          payment_provider: extraParsed.payment_provider || null,
-          payment_method: extraParsed.payment_method || null,
-          auto_renew: typeof extraParsed.auto_renew === 'boolean' ? extraParsed.auto_renew : null,
-          duration_days: extraParsed.duration_days || null,
-          last_payment_id: extraParsed.last_payment_id || null
+          card_expiry: claimData.card_expiry
         };
       }
     }
 
     if (!authData) return res.status(400).send('❌ Sesión expirada o inválida');
 
-    console.log('📦 Datos para completar auth:', {
-      email: authData.email,
-      plan_id: authData.plan_id,
-      subscription_id: authData.subscription_id,
-      payment_provider: authData.payment_provider,
-      payment_method: authData.payment_method
-    });
+    console.log('📦 Datos para completar auth:', { email: authData.email, plan_id: authData.plan_id, subscription_id: authData.subscription_id });
 
+    // Intercambiar code por access_token en Discord
     const params = new URLSearchParams({
       client_id: DISCORD_CLIENT_ID,
       client_secret: DISCORD_CLIENT_SECRET,
@@ -764,6 +706,7 @@ app.get('/discord/callback', async (req, res) => {
     }
     console.log('✅ Token obtenido');
 
+    // Obtener info del usuario
     const userResponse = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${tokenData.access_token}` }
     });
@@ -772,6 +715,7 @@ app.get('/discord/callback', async (req, res) => {
     const discordUsername = userData.username;
     console.log('👤 Usuario Discord:', discordUsername, '(' + discordId + ')');
 
+    // Agregar al servidor (invite via OAuth2)
     try {
       await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`, {
         method: 'PUT',
@@ -786,6 +730,7 @@ app.get('/discord/callback', async (req, res) => {
       console.log('ℹ️ Usuario ya está en el servidor o no pudo agregarse:', err?.message || err);
     }
 
+    // Asignar rol según plan
     const roleId = getRoleIdForPlan(authData.plan_id);
     console.log('🎭 Asignando rol:', roleId, 'para plan:', authData.plan_id);
     try {
@@ -797,48 +742,21 @@ app.get('/discord/callback', async (req, res) => {
       console.error('❌ Error asignando rol:', err);
     }
 
-    // Guardar en Supabase memberships
+    // Guardar en Supabase memberships (incluyendo last4 y card_expiry si estaban)
     try {
-      const now = new Date();
-      const nowIso = now.toISOString();
-
       const membershipRow = {
         email: authData.email,
         name: authData.name,
         plan_id: authData.plan_id,
-        subscription_id: authData.subscription_id || '',
-        customer_id: authData.customer_id || '',
+        subscription_id: authData.subscription_id,
+        customer_id: authData.customer_id,
         discord_id: discordId,
         discord_username: discordUsername,
         status: 'active',
-        created_at: nowIso,
-        start_at: nowIso,
-        payment_provider: authData.payment_provider || null,
-        payment_method: authData.payment_method || null
+        created_at: new Date().toISOString()
       };
-
-      if (typeof authData.auto_renew === 'boolean') {
-        membershipRow.auto_renew = authData.auto_renew;
-      }
-
       if (authData.last4) membershipRow.last4 = authData.last4;
       if (authData.card_expiry) membershipRow.card_expiry = authData.card_expiry;
-      if (authData.last_payment_id) membershipRow.last_payment_id = authData.last_payment_id;
-
-      // Para cripto (NOWPayments) calculamos end_at según plan
-      const isCrypto =
-        authData.payment_provider === 'nowpayments' ||
-        authData.payment_method === 'crypto';
-
-      if (isCrypto) {
-        let durationDays = authData.duration_days || getPlanDurationDays(authData.plan_id);
-        if (durationDays && !isNaN(durationDays)) {
-          const endDate = new Date();
-          endDate.setUTCDate(endDate.getUTCDate() + Number(durationDays));
-          membershipRow.end_at = endDate.toISOString();
-        }
-      }
-
       const { error: insErr } = await supabase.from('memberships').insert(membershipRow);
       if (insErr) {
         console.error('❌ Error guardando en Supabase memberships:', insErr);
@@ -849,7 +767,7 @@ app.get('/discord/callback', async (req, res) => {
       console.error('❌ Error con Supabase (memberships):', err);
     }
 
-    // Marcar claim usado si venía de BD
+    // Si venía de claim (DB), marcar used = true ahora que el registro fue completado
     if (claimData) {
       try {
         const { error: markErr } = await supabase
@@ -866,11 +784,9 @@ app.get('/discord/callback', async (req, res) => {
       }
     }
 
-    // Limpiar pendingAuths si existía
-    if (pendingAuths.has(state)) {
-      pendingAuths.delete(state);
-    }
+    // Si venía de pendingAuths, limpiamos pendingAuths.delete(state);
 
+    // Redirigir a frontend o mostrar página de éxito
     const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg/sXjU5ZVzXU';
     return res.send(`
 <!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
@@ -889,7 +805,7 @@ app.get('/discord/callback', async (req, res) => {
 });
 
 // ============================================
-// WEBHOOK DE BRAINTREE (tarjeta)
+// WEBHOOK DE BRAINTREE (mantener según tu implementación)
 app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-urlencoded' }), async (req, res) => {
   console.log('📬 Webhook recibido de Braintree');
   try {
@@ -902,157 +818,6 @@ app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-u
     res.sendStatus(500);
   }
 });
-
-// ============================================
-// WEBHOOK DE NOWPAYMENTS (CRIPTO)
-// Soporta tanto order_id="email::plan_id" como IDs numéricos de planes (CPLAN_ID_*NOW)
-app.post('/api/nowpayments/webhook', async (req, res) => {
-  try {
-    const ipn = req.body || {};
-    console.log('📬 IPN de NOWPayments recibido:', ipn.payment_id, ipn.payment_status);
-
-    const status = (ipn.payment_status || '').toLowerCase();
-
-    // Solo procesamos pagos completados/confirmados
-    if (status !== 'finished' && status !== 'confirmed') {
-      console.log('ℹ️ IPN NOWPayments con estado no finalizado, ignorando:', status);
-      return res.sendStatus(200);
-    }
-
-    let email = '';
-    let planId = '';
-
-    // 1) Intentar extraer desde order_id en formato "email::plan_id"
-    if (ipn.order_id && String(ipn.order_id).includes('::')) {
-      const parts = String(ipn.order_id).split('::');
-      if (parts.length >= 2) {
-        email = String(parts[0] || '').trim().toLowerCase();
-        planId = String(parts[1] || '').trim();
-      }
-    }
-
-    // 2) Si no hay planId aún, intentar mapear desde product_id / price_id / plan_id / order_id
-    if (!planId) {
-      const possibleId = String(
-        ipn.product_id ||
-        ipn.price_id ||
-        ipn.plan_id ||
-        (!String(ipn.order_id || '').includes('::') ? ipn.order_id : '') ||
-        ''
-      ).trim();
-      if (possibleId && NOWPAYMENT_PLAN_MAP[possibleId]) {
-        planId = NOWPAYMENT_PLAN_MAP[possibleId];
-      }
-    }
-
-    // 3) Si aún no hay email, usar customer_email
-    if (!email && ipn.customer_email) {
-      email = String(ipn.customer_email).trim().toLowerCase();
-    }
-
-    // 4) Validación final
-    if (!email || !planId) {
-      console.error('❌ NOWPayments IPN sin email o planId interpretables.', {
-        order_id: ipn.order_id,
-        product_id: ipn.product_id,
-        price_id: ipn.price_id,
-        plan_id_raw: ipn.plan_id,
-        customer_email: ipn.customer_email
-      });
-      return res.sendStatus(200); // evitar reintentos en bucle
-    }
-
-    const durationDays = getPlanDurationDays(planId);
-    console.log('📦 NOWPayments IPN parseado:', { email, planId, durationDays });
-
-    const extra = {
-      source: 'nowpayments_ipn',
-      payment_provider: 'nowpayments',
-      payment_method: 'crypto',
-      auto_renew: false,
-      duration_days: durationDays || null,
-      last_payment_id: ipn.payment_id || null,
-      nowpayments_payload: {
-        order_id: ipn.order_id || null,
-        product_id: ipn.product_id || null,
-        price_id: ipn.price_id || null,
-        price_amount: ipn.price_amount || null,
-        pay_amount: ipn.pay_amount || null,
-        pay_currency: ipn.pay_currency || null,
-        currency: ipn.currency || null
-      }
-    };
-
-    // Creamos claim + email de bienvenida con link de claim
-    try {
-      await sendWelcomeEmail(email, '', planId, null, null, extra);
-      console.log('✅ Claim + email generados para NOWPayments');
-    } catch (err) {
-      console.error('❌ Error creando claim/enviando email desde NOWPayments IPN:', err.message || err);
-    }
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error('❌ Error en /api/nowpayments/webhook:', err);
-    return res.sendStatus(500);
-  }
-});
-
-// ============================================
-// JOB: revisar expiraciones de CRIPTO (NOWPayments)
-// Saca rol cuando end_at < ahora y payment_provider = 'nowpayments'
-async function checkExpiredCryptoMemberships() {
-  try {
-    const nowIso = new Date().toISOString();
-    const { data: rows, error } = await supabase
-      .from('memberships')
-      .select('id,discord_id,plan_id,end_at,status,payment_provider')
-      .eq('status', 'active')
-      .eq('payment_provider', 'nowpayments')
-      .lt('end_at', nowIso);
-
-    if (error) {
-      console.error('❌ Error consultando memberships expirados (cripto):', error);
-      return;
-    }
-    if (!rows || rows.length === 0) return;
-
-    console.log(`⏰ Encontrados ${rows.length} memberships cripto expirados. Procesando...`);
-    const guild = await discordClient.guilds.fetch(GUILD_ID);
-
-    for (const row of rows) {
-      try {
-        if (row.discord_id) {
-          try {
-            const member = await guild.members.fetch(row.discord_id);
-            const roleId = getRoleIdForPlan(row.plan_id);
-            if (roleId && member.roles.cache.has(roleId)) {
-              await member.roles.remove(roleId);
-              console.log(`✅ Rol removido (cripto expirado) para discord_id=${row.discord_id}`);
-            }
-          } catch (err) {
-            console.warn('⚠️ No se pudo remover rol o fetch member (cripto):', err.message || err);
-          }
-        }
-
-        const { error: updErr } = await supabase
-          .from('memberships')
-          .update({ status: 'expired', expired_at: new Date().toISOString() })
-          .eq('id', row.id);
-        if (updErr) {
-          console.error('❌ Error marcando membership cripto como expirado:', updErr);
-        }
-      } catch (loopErr) {
-        console.error('❌ Error en loop de expiración cripto:', loopErr);
-      }
-    }
-  } catch (err) {
-    console.error('❌ Error general en checkExpiredCryptoMemberships:', err);
-  }
-}
-
-// Ejecutar cada hora
-setInterval(checkExpiredCryptoMemberships, 60 * 60 * 1000);
 
 // ============================================
 // HEALTH CHECK
