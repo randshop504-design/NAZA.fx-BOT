@@ -42,6 +42,18 @@ const FRONTEND_URL = process.env.FRONTEND_URL || ''; // opcional
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || ''; // opcional (firma IPN)
 const NOWPAYMENTS_MIN_LOG_LEVEL = process.env.NOWPAYMENTS_MIN_LOG_LEVEL || 'info';
 
+// IDs numéricos de planes de NOWPayments (los que viste en el panel)
+const CPLAN_ID_ANUALNOW = process.env.CPLAN_ID_ANUALNOW || '796655126';
+const CPLAN_ID_MENSUALNOW = process.env.CPLAN_ID_MENSUALNOW || '1375179357';
+const CPLAN_ID_TRIMESTRALNOW = process.env.CPLAN_ID_TRIMESTRALNOW || '335904819';
+
+// Mapeo: id de NOWPayments -> plan interno
+const NOWPAYMENT_PLAN_MAP = {
+  [CPLAN_ID_ANUALNOW]: 'plan_anual',
+  [CPLAN_ID_MENSUALNOW]: 'plan_mensual',
+  [CPLAN_ID_TRIMESTRALNOW]: 'plan_trimestral'
+};
+
 // ============================================
 // CONFIGURAR SENDGRID
 if (!SENDGRID_API_KEY) {
@@ -893,7 +905,7 @@ app.post('/api/braintree/webhook', express.raw({ type: 'application/x-www-form-u
 
 // ============================================
 // WEBHOOK DE NOWPAYMENTS (CRIPTO)
-// IMPORTANTE: el frontend debe enviar order_id como "email::plan_id" al crear el invoice.
+// Soporta tanto order_id="email::plan_id" como IDs numéricos de planes (CPLAN_ID_*NOW)
 app.post('/api/nowpayments/webhook', async (req, res) => {
   try {
     const ipn = req.body || {};
@@ -907,10 +919,11 @@ app.post('/api/nowpayments/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // EXTRAER email y plan_id desde order_id (formato: "email::plan_id")
     let email = '';
     let planId = '';
-    if (ipn.order_id) {
+
+    // 1) Intentar extraer desde order_id en formato "email::plan_id"
+    if (ipn.order_id && String(ipn.order_id).includes('::')) {
       const parts = String(ipn.order_id).split('::');
       if (parts.length >= 2) {
         email = String(parts[0] || '').trim().toLowerCase();
@@ -918,14 +931,35 @@ app.post('/api/nowpayments/webhook', async (req, res) => {
       }
     }
 
-    // Si NOWPayments también te manda email directo:
+    // 2) Si no hay planId aún, intentar mapear desde product_id / price_id / plan_id / order_id
+    if (!planId) {
+      const possibleId = String(
+        ipn.product_id ||
+        ipn.price_id ||
+        ipn.plan_id ||
+        (!String(ipn.order_id || '').includes('::') ? ipn.order_id : '') ||
+        ''
+      ).trim();
+      if (possibleId && NOWPAYMENT_PLAN_MAP[possibleId]) {
+        planId = NOWPAYMENT_PLAN_MAP[possibleId];
+      }
+    }
+
+    // 3) Si aún no hay email, usar customer_email
     if (!email && ipn.customer_email) {
       email = String(ipn.customer_email).trim().toLowerCase();
     }
 
+    // 4) Validación final
     if (!email || !planId) {
-      console.error('❌ NOWPayments IPN sin email o planId interpretables. order_id esperado: "email::plan_id"');
-      return res.sendStatus(200); // no reintentar en bucle
+      console.error('❌ NOWPayments IPN sin email o planId interpretables.', {
+        order_id: ipn.order_id,
+        product_id: ipn.product_id,
+        price_id: ipn.price_id,
+        plan_id_raw: ipn.plan_id,
+        customer_email: ipn.customer_email
+      });
+      return res.sendStatus(200); // evitar reintentos en bucle
     }
 
     const durationDays = getPlanDurationDays(planId);
@@ -940,6 +974,8 @@ app.post('/api/nowpayments/webhook', async (req, res) => {
       last_payment_id: ipn.payment_id || null,
       nowpayments_payload: {
         order_id: ipn.order_id || null,
+        product_id: ipn.product_id || null,
+        price_id: ipn.price_id || null,
         price_amount: ipn.price_amount || null,
         pay_amount: ipn.pay_amount || null,
         pay_currency: ipn.pay_currency || null,
