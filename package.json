@@ -1,7 +1,7 @@
 {
   "name": "naza-bot",
   "version": "5.0.2",
-  "description": "NAZA Trading Academy Bot - Discord + OAuth2 + WHOP webhooks",
+  "description": "NAZA Trading Academy Bot - Discord + OAuth2 + WHOP webhooks (clean)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
