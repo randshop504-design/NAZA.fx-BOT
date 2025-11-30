@@ -391,6 +391,9 @@ app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (r
   try {
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
 
+    // 🔍 NUEVO: ver todos los headers reales que llegan
+    console.log('TODOS LOS HEADERS WHOP:', req.headers);
+
     // Logs para detectar exactamente qué manda WHOP
     console.log('HEADERS WHOP (resumen):', {
       'x-whop-signature': req.headers['x-whop-signature'],
