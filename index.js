@@ -1,4 +1,3 @@
-
 const express = require('express');
 const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
@@ -7,8 +6,16 @@ const crypto = require('crypto');
 const fetch = global.fetch;
 const app = express();
 
-// NOTE: keep JSON parsing global except for raw webhook route
-app.use(express.json());
+// ============================================
+// PARSEADO (capturamos raw body para webhooks mientras parseamos JSON globalmente)
+app.use(express.json({
+  verify: (req, res, buf) => {
+    if (buf && buf.length) {
+      // Guardamos una copia del raw body para verificaciones HMAC (webhooks).
+      req.rawBody = Buffer.from(buf);
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================
@@ -45,6 +52,19 @@ const WHOP_WEBHOOK_SECRET = process.env.WHOP_WEBHOOK_SECRET || '';
 const WHOP_API_KEY = process.env.WHOP_API_KEY || '';
 const JWT_SIGNING_SECRET = process.env.JWT_SIGNING_SECRET || '';
 const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// ============================================
+// STARTUP: validación ligera de env vars críticas (solo warnings, no exit)
+const _requiredEnvs = [
+  { k: 'SUPABASE_URL', v: SUPABASE_URL },
+  { k: 'SUPABASE_SERVICE_ROLE', v: SUPABASE_SERVICE_ROLE },
+  { k: 'WHOP_WEBHOOK_SECRET', v: WHOP_WEBHOOK_SECRET }
+];
+_requiredEnvs.forEach(item => {
+  if (!item.v) {
+    console.warn(`⚠️ ENV no definido: ${item.k} — esto puede causar fallos en tiempo de ejecución.`);
+  }
+});
 
 // ============================================
 // SENDGRID
@@ -90,17 +110,36 @@ function escapeHtml(str) {
 function emailSafe(e){ return e || ''; }
 
 // ============================================
-// CORS MIDDLEWARE
+// CORS MIDDLEWARE (dinámico y compatible con credentials)
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (ALLOWED_ORIGINS.length === 0) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  } else if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+
+  // Siempre variar por Origin para caches
+  res.setHeader('Vary', 'Origin');
+
+  if (origin) {
+    // Si ALLOWED_ORIGINS está vacío permitimos cualquier origin dinámicamente (pero no usamos '*')
+    if (ALLOWED_ORIGINS.length === 0) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    } else {
+      // Si origin está en la whitelist, permitirlo
+      if (ALLOWED_ORIGINS.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+      }
+      // si no está en la whitelist, no exponemos CORS headers (petición será bloqueada por browser)
+    }
+  } else {
+    // No hay origin (p. ej. petición server->server). Si no hay lista, permitimos cualquier origen con '*'
+    if (ALLOWED_ORIGINS.length === 0) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      // no añadimos Access-Control-Allow-Credentials cuando usamos '*'
+    }
   }
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-frontend-token, x-signature, x-whop-signature');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -127,7 +166,7 @@ async function logAccess(membership_id = null, event_type = 'generic', detail = 
 }
 
 // ============================================
-// CLAIMS + VALIDATIONS (createClaimToken adapted)
+// CLAIMS + VALIDACIONES (createClaimToken adapted)
 async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra = {} }) {
   email = (email || '').trim().toLowerCase();
   if (!email) throw new Error('Email requerido para crear claim');
@@ -205,61 +244,79 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 }
 
 // ============================================
-// WEBHOOK: WHOP (raw body required for signature verification)
-// Updated to perform safe signature checking (avoid throws)
-app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req, res) => {
+// WEBHOOK: WHOP (usamos req.rawBody capturado por express.json verify)
+// Safe signature checking, tolerante a prefijos comunes (sha256=)
+app.post('/webhook/whop', async (req, res) => {
   try {
-    const rawBody = req.body; // Buffer
-    const signatureHeader = (req.headers['x-whop-signature'] || req.headers['x-signature'] || '').toString();
+    // Obtén raw body (Buffer) si fue guardado por el middleware de parseo
+    const rawBody = req.rawBody && Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(JSON.stringify(req.body || {}));
+
+    // Normalizar header de firma — soportamos formas como "sha256=..." o sólo hex
+    let signatureHeader = (req.headers['x-whop-signature'] || req.headers['x-signature'] || '').toString();
+    signatureHeader = signatureHeader.replace(/^sha256=/i, '').replace(/^sha1=/i, '').replace(/^v[0-9]+=|^signature=/i, '').trim();
+
     if (!WHOP_WEBHOOK_SECRET) {
       console.error('WHOP_WEBHOOK_SECRET no configurado');
       return res.status(500).send('Server misconfigured');
     }
     if (!signatureHeader) {
       console.warn('Webhook sin signature header');
+      await logAccess(null, 'webhook_no_signature', {});
       return res.status(401).send('No signature');
     }
 
-    const sigHeader = (signatureHeader || '').toString().trim();
-    if (!/^[a-f0-9]{64}$/i.test(sigHeader)) {
-      console.warn('Signature header formato inválido o longitud incorrecta:', sigHeader.slice(0,8));
-      await logAccess(null, 'webhook_invalid_signature_format', { header_sample: sigHeader.slice(0,8) });
-      return res.status(401).send('Invalid signature');
-    }
-    const computed = crypto.createHmac('sha256', WHOP_WEBHOOK_SECRET).update(rawBody).digest('hex');
-    const computedBuf = Buffer.from(computed, 'hex');
-    const headerBuf = Buffer.from(sigHeader, 'hex');
-    if (computedBuf.length !== headerBuf.length) {
-      console.warn('Signature length mismatch');
-      await logAccess(null, 'webhook_invalid_signature_length', { header_sample: sigHeader.slice(0,8) });
-      return res.status(401).send('Invalid signature');
-    }
-    const signatureMatches = crypto.timingSafeEqual(computedBuf, headerBuf);
-    if (!signatureMatches) {
-      console.warn('Firma webhook inválida');
-      await logAccess(null, 'webhook_invalid_signature', { header: sigHeader.slice(0,8) });
+    // Validar formato (64 hex chars para sha256)
+    if (!/^[a-f0-9]{64}$/i.test(signatureHeader)) {
+      console.warn('Signature header formato inválido o longitud incorrecta:', signatureHeader.slice(0,8));
+      await logAccess(null, 'webhook_invalid_signature_format', { header_sample: signatureHeader.slice(0,8) });
       return res.status(401).send('Invalid signature');
     }
 
-    const payload = JSON.parse(rawBody.toString('utf8'));
-    const event = payload.event || payload.type || payload.kind || payload?.data?.event || null;
+    // Calcular HMAC usando raw body capturado
+    const computed = crypto.createHmac('sha256', WHOP_WEBHOOK_SECRET).update(rawBody).digest('hex');
+    const computedBuf = Buffer.from(computed, 'hex');
+    const headerBuf = Buffer.from(signatureHeader, 'hex');
+
+    if (computedBuf.length !== headerBuf.length) {
+      console.warn('Signature length mismatch');
+      await logAccess(null, 'webhook_invalid_signature_length', { header_sample: signatureHeader.slice(0,8) });
+      return res.status(401).send('Invalid signature');
+    }
+
+    const signatureMatches = crypto.timingSafeEqual(computedBuf, headerBuf);
+    if (!signatureMatches) {
+      console.warn('Firma webhook inválida (muestra):', signatureHeader.slice(0,8));
+      await logAccess(null, 'webhook_invalid_signature', { header_sample: signatureHeader.slice(0,8) });
+      return res.status(401).send('Invalid signature');
+    }
+
+    // Parseamos payload seguro
+    let payload = null;
+    try {
+      payload = JSON.parse(rawBody.toString('utf8'));
+    } catch (parseErr) {
+      // Si no se puede parsear, usamos req.body como fallback
+      payload = req.body || {};
+    }
+
+    const event = payload.event || payload.type || payload.kind || (payload.data && payload.data.event) || null;
     const data = payload.data || payload || {};
     await logAccess(null, 'webhook_received', { event });
 
     // Continue with your existing logic...
+    // NOTE: aquí sigue tu lógica de procesamiento de eventos (no modificada)
+    return res.status(200).send('ok');
   } catch (err) {
     console.error('❌ Error general en /webhook/whop:', err?.message || err);
     return res.status(500).send('internal error');
   }
 });
+
 // Liveness endpoint for Render health check
 app.get('/health', (req, res) => {
   // Minimal, fast response so external health checks (e.g. Render) pass quickly
   return res.status(200).json({ ok: true, uptime: process.uptime(), ts: new Date().toISOString() });
 });
-
-
-
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('🚀 NAZA Bot - servidor iniciado');
