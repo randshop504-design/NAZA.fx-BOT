@@ -1,18 +1,18 @@
 {
   "name": "naza-bot",
-  "version": "5.0.0",
-  "description": "NAZA Trading Academy Bot - Braintree + Discord + OAuth2",
+  "version": "5.0.1",
+  "description": "NAZA Trading Academy Bot - Discord + OAuth2 + WHOP webhooks",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "braintree": "^3.16.0",
     "discord.js": "^14.14.1",
     "@supabase/supabase-js": "^2.39.0",
     "nodemailer": "^6.9.7",
-    "@sendgrid/mail": "^8.1.5"
+    "@sendgrid/mail": "^8.1.5",
+    "node-fetch": "^3.4.1"
   },
   "engines": {
     "node": ">=18.0.0"
