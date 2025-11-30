@@ -1,4 +1,3 @@
-
 const express = require('express');
 const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
