@@ -2,16 +2,19 @@
   "name": "naza-bot",
   "version": "5.0.2",
   "description": "NAZA Trading Academy Bot - Discord + OAuth2 + WHOP webhooks (clean)",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
-    "start:dev": "DEBUG=* node index.js"
+    "start": "node server.js",
+    "start:dev": "DEBUG=* node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "discord.js": "^14.14.1",
     "@supabase/supabase-js": "^2.39.0",
-    "@sendgrid/mail": "^8.1.5"
+    "@sendgrid/mail": "^8.1.5",
+    "body-parser": "^1.20.2",
+    "helmet": "^7.0.0",
+    "express-rate-limit": "^7.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
