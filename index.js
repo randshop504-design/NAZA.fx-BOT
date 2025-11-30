@@ -373,21 +373,37 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 }
 
 // ============================================
+// Helper: intenta decodificar firma (hex -> base64 fallback)
+function getSignatureBuffer(headerValue) {
+  if (!headerValue) return null;
+  let sig = String(headerValue).replace(/^sha256=/i, '').trim();
+  // si parece hex (64 hex chars) -> hex
+  if (/^[0-9a-f]{64}$/i.test(sig)) {
+    try { return Buffer.from(sig, 'hex'); } catch (e) { /* fallthrough */ }
+  }
+  // probar base64
+  try { return Buffer.from(sig, 'base64'); } catch (e) { return null; }
+}
+
+// ============================================
 // WEBHOOK: WHOP (raw bytes para HMAC)
 app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (req, res) => {
   try {
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
 
-    // Logs simples para que tú veas qué manda WHOP
-    console.log('FIRMA WHOP:', req.headers['x-whop-signature'] || req.headers['x-signature']);
+    // Logs para detectar exactamente qué manda WHOP
+    console.log('HEADERS WHOP (resumen):', {
+      'x-whop-signature': req.headers['x-whop-signature'],
+      'x-signature': req.headers['x-signature'],
+      'content-type': req.headers['content-type']
+    });
+    console.log('FIRMA RAW (x-whop-signature):', req.headers['x-whop-signature']);
+    console.log('FIRMA RAW (x-signature):', req.headers['x-signature']);
     console.log('PAYLOAD WHOP (inicio):', rawBody.toString('utf8').slice(0, 400));
 
-    // Normalizar header de firma
+    // Normalizar header de firma (quitamos prefijos comunes)
     let signatureHeader = (req.headers['x-whop-signature'] || req.headers['x-signature'] || '').toString();
-    signatureHeader = signatureHeader.replace(/^sha256=/i, '')
-                                     .replace(/^sha1=/i, '')
-                                     .replace(/^v[0-9]+=|^signature=/i, '')
-                                     .trim();
+    signatureHeader = signatureHeader.replace(/^sha256=/i, '').replace(/^sha1=/i, '').replace(/^v[0-9]+=|^signature=/i, '').trim();
 
     if (!WHOP_WEBHOOK_SECRET) {
       console.error('WHOP_WEBHOOK_SECRET no configurado');
@@ -399,21 +415,12 @@ app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (r
       return res.status(401).send('No signature');
     }
 
-    // Intentar decodificar header: hex o base64
-    let headerBuf = null;
-    try {
-      headerBuf = Buffer.from(signatureHeader, 'hex');
-      if (headerBuf.length !== 32) {
-        headerBuf = Buffer.from(signatureHeader, 'base64');
-      }
-    } catch (e) {
-      try {
-        headerBuf = Buffer.from(signatureHeader, 'base64');
-      } catch (e2) {
-        console.warn('Signature header formato inválido (ni hex ni base64)');
-        await logAccess(null, 'webhook_invalid_signature_format', { header_sample: signatureHeader.slice(0,8) });
-        return res.status(401).send('Invalid signature format');
-      }
+    // Decodificar usando helper (hex o base64)
+    const headerBuf = getSignatureBuffer(req.headers['x-whop-signature'] || req.headers['x-signature']);
+    if (!headerBuf) {
+      console.warn('Signature header formato inválido (ni hex ni base64):', signatureHeader.slice(0,8));
+      await logAccess(null, 'webhook_invalid_signature_format', { header_sample: signatureHeader.slice(0,8) });
+      return res.status(401).send('Invalid signature format');
     }
 
     const computed = crypto.createHmac('sha256', WHOP_WEBHOOK_SECRET).update(rawBody).digest();
