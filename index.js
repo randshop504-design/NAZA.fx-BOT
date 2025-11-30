@@ -1,19 +1,20 @@
-// index.js - NAZA (reparado)
-// Node >=18 required
+// server.js - NAZA Bot (versión revisada)
+// Requisitos: Node >= 18 recomendado (por global.fetch), instalar dependencias:
+// npm i express body-parser @supabase/supabase-js discord.js @sendgrid/mail helmet express-rate-limit
+
 const express = require('express');
+const bodyParser = require('body-parser');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
-const fetch = global.fetch || require('node-fetch');
+
 const app = express();
 
-// NOTE: keep JSON parsing global except for raw webhook route
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
 // ============================================
-// CONFIGURACIÓN (variables de entorno)
+// CONFIG / ENV
 const FRONTEND_TOKEN = process.env.FRONTEND_TOKEN;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -21,13 +22,15 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL;
 const GUILD_ID = process.env.GUILD_ID;
-const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD;
-const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD;
-const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD;
+
+const ROLE_ID_MENSUAL = process.env.ROLE_ID_MENSUAL || process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_MENSUAL_DISCORD || null;
+const ROLE_ID_TRIMESTRAL = process.env.ROLE_ID_TRIMESTRAL || process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL_DISCORD || null;
+const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUAL || process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUAL_DISCORD || null;
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
-const FROM_EMAIL = process.env.FROM_EMAIL;
+const FROM_EMAIL = process.env.FROM_EMAIL || 'soporte@nazaacademy.com';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || FROM_EMAIL;
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
@@ -38,67 +41,73 @@ const WHOP_API_KEY = process.env.WHOP_API_KEY || '';
 const JWT_SIGNING_SECRET = process.env.JWT_SIGNING_SECRET || '';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// ============================================
-// SENDGRID
-if (!SENDGRID_API_KEY) {
-  console.warn('⚠️ SENDGRID_API_KEY no definido. Los correos no podrán enviarse.');
-} else {
-  sgMail.setApiKey(SENDGRID_API_KEY);
-}
-
-// ============================================
-// DISCORD CLIENT
-const discordClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
-if (DISCORD_BOT_TOKEN) {
-  discordClient.login(DISCORD_BOT_TOKEN).catch(err => {
-    console.error('❌ Error login Discord bot:', err?.message || err);
-  });
-}
-discordClient.once('ready', () => {
-  console.log('✅ Discord bot conectado:', discordClient.user?.tag || '(sin tag aún)');
-});
-
-// ============================================
-// SUPABASE CLIENT
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
-  global: {
-    headers: {
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
-      apikey: SUPABASE_SERVICE_ROLE
-    }
+// Fail-fast (en producción) si faltan envs críticas
+const REQUIRED = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE', 'WHOP_WEBHOOK_SECRET'];
+const missing = REQUIRED.filter(k => !process.env[k]);
+if (missing.length > 0) {
+  const msg = `❌ Faltan ENV obligatorias: ${missing.join(', ')}`;
+  if (NODE_ENV === 'production') {
+    console.error(msg);
+    process.exit(1);
+  } else {
+    console.warn(msg);
   }
-});
+}
 
 // ============================================
-// TEMP STORAGE (kept but DB-first is primary)
+// MIDDLEWARES GENERALES
+app.use(helmet());
+
+// Rate limiter (ajusta según tu tráfico)
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(limiter);
+
+// parse JSON para rutas normales (NO para webhook raw)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ============================================
+// Utiles globales
 const pendingAuths = new Map();
 
-// ============================================
-// UTIL: escape/email-safe
 function escapeHtml(str) {
   if (!str) return '';
-  return String(str)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;')
-    .replace(/'/g,'&#39;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function emailSafe(e){ return e || ''; }
 
 // ============================================
-// CORS MIDDLEWARE
+// CORS Dinámico (compat con credentials)
+// NOTA: en producción define ALLOWED_ORIGINS explícitamente
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (ALLOWED_ORIGINS.length === 0) {
-    // if not configured, allow all for dev — but recommend setting ALLOWED_ORIGINS
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  } else if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+
+  if (origin) {
+    if (ALLOWED_ORIGINS.length === 0) {
+      // En ausencia de whitelist permitimos origen dinámico (cuidado con credentials)
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    } else {
+      if (ALLOWED_ORIGINS.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+      }
+      // si no está en whitelist, no añadimos CORS headers (browser bloqueará)
+    }
+  } else {
+    if (ALLOWED_ORIGINS.length === 0) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
   }
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-frontend-token, x-signature, x-whop-signature');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -115,78 +124,69 @@ function authenticateFrontend(req, res, next) {
 }
 
 // ============================================
-// ACCESS LOG helper
+// SUPABASE CLIENT
+let supabase = null;
+try {
+  supabase = createClient(SUPABASE_URL || '', SUPABASE_SERVICE_ROLE || '', {
+    global: {
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE || ''}`,
+        apikey: SUPABASE_SERVICE_ROLE || ''
+      }
+    }
+  });
+} catch (e) {
+  console.warn('⚠️ No se pudo inicializar Supabase:', e?.message || e);
+}
+
+// ============================================
+// SENDGRID
+if (!SENDGRID_API_KEY) {
+  console.warn('⚠️ SENDGRID_API_KEY no definido. Los correos no podrán enviarse.');
+} else {
+  sgMail.setApiKey(SENDGRID_API_KEY);
+}
+
+// ============================================
+// DISCORD CLIENT (opcional)
+const discordClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+if (DISCORD_BOT_TOKEN) {
+  discordClient.login(DISCORD_BOT_TOKEN).catch(err => {
+    console.error('❌ Error login Discord bot:', err?.message || err);
+  });
+  discordClient.once('ready', () => {
+    console.log('✅ Discord bot conectado:', discordClient.user?.tag || '(sin tag aún)');
+  });
+} else {
+  console.log('ℹ️ DISCORD_BOT_TOKEN no definido: el cliente Discord no se conectará.');
+}
+
+// ============================================
+// ACCESS LOG helper (seguro)
 async function logAccess(membership_id = null, event_type = 'generic', detail = {}) {
   try {
-    await supabase
-      .from('access_logs')
-      .insert([{
-        membership_id,
-        event_type,
-        detail: JSON.stringify(detail || {}),
-        created_at: new Date().toISOString()
-      }]);
+    if (!supabase) throw new Error('Supabase no inicializado');
+    await supabase.from('access_logs').insert([{ membership_id, event_type, detail: JSON.stringify(detail || {}), created_at: new Date().toISOString() }]);
   } catch (err) {
+    // No rompas flujo por logging
     console.warn('⚠️ No se pudo insertar access_log:', err?.message || err);
   }
 }
 
 // ============================================
-// PLAN DETECTION (para cualquier producto/membresía)
-function detectPlanKeyFromString(planIdRaw) {
-  const txt = (planIdRaw || '').toString().toLowerCase();
-  if (!txt) return 'other';
-
-  // mensual
-  if (
-    txt.includes('plan_mensual') ||
-    txt.includes('mensual') ||
-    txt.includes('monthly') ||
-    txt.includes('mes') ||
-    txt.includes('30 dias') ||
-    txt.includes('30 días')
-  ) return 'plan_mensual';
-
-  // trimestral
-  if (
-    txt.includes('plan_trimestral') ||
-    txt.includes('trimestral') ||
-    txt.includes('quarter') ||
-    txt.includes('3 meses') ||
-    txt.includes('90 dias') ||
-    txt.includes('90 días')
-  ) return 'plan_trimestral';
-
-  // anual
-  if (
-    txt.includes('plan_anual') ||
-    txt.includes('anual') ||
-    txt.includes('annual') ||
-    txt.includes('12 meses') ||
-    txt.includes('year') ||
-    txt.includes('1 año') ||
-    txt.includes('1 ano')
-  ) return 'plan_anual';
-
-  return 'other';
-}
-
-// ============================================
-// CLAIMS + VALIDATIONS (createClaimToken adapted, no debug logs)
+// createClaimToken (mejor manejo de errores y race handling)
 async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra = {} }) {
   email = (email || '').trim().toLowerCase();
   if (!email) throw new Error('Email requerido para crear claim');
 
+  if (!supabase) throw new Error('Servicio no disponible');
+
   // 1) verificar membership existente
-  const { data: existingMembership, error: memErr } = await supabase
-    .from('memberships')
-    .select('id')
-    .eq('email', email)
-    .limit(1);
+  const { data: existingMembership, error: memErr } = await supabase.from('memberships').select('id').eq('email', email).limit(1);
   if (memErr) {
     console.error('Error consultando memberships:', memErr);
     if (memErr.code === 'PGRST205' || (memErr.message && memErr.message.includes('Could not find the table'))) {
-      console.error('ERROR: Parece que la tabla "memberships" no existe o la service role key está mal.');
+      console.error('ERROR: Parece que la tabla "memberships" no existe o la service role key está mal.' );
     }
     throw new Error('Error interno');
   }
@@ -195,17 +195,13 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   }
 
   // 2) verificar claim pendiente
-  const { data: existingClaimsForEmail, error: claimErr } = await supabase
-    .from('claims')
-    .select('id, used')
-    .eq('email', email)
-    .limit(1);
+  const { data: existingClaimsForEmail, error: claimErr } = await supabase.from('claims').select('id, used').eq('email', email).limit(1);
   if (claimErr) {
     console.error('Error consultando claims por email:', claimErr);
     throw new Error('Error interno');
   }
   if (existingClaimsForEmail && existingClaimsForEmail.length > 0) {
-    throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
+    throw new Error('Existe ya una solicitud para este correo. Revisa tu email.' );
   }
 
   // 3) verificar uso de tarjeta (no permitir >2 correos distintos)
@@ -221,7 +217,7 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     (cRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
     distinctEmails.delete('');
     if (distinctEmails.size >= 2 && !distinctEmails.has(email)) {
-      throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.');
+      throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.' );
     }
   }
 
@@ -231,7 +227,7 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     supabase.from('claims').select('id,used').eq('email', email).limit(1)
   ]);
   if (recheckMembership && recheckMembership.length > 0) throw new Error('Este correo ya está registrado');
-  if (recheckClaim && recheckClaim.length > 0) throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
+  if (recheckClaim && recheckClaim.length > 0) throw new Error('Existe ya una solicitud para este correo. Revisa tu email.' );
 
   // generate token
   const token = crypto.randomBytes(24).toString('hex'); // 48 chars
@@ -248,9 +244,15 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     used: false,
     created_at: new Date().toISOString()
   };
-  const { error: insertErr } = await supabase.from('claims').insert([row]);
+
+  const { data: insertData, error: insertErr } = await supabase.from('claims').insert([row]);
   if (insertErr) {
     console.error('Error insertando claim:', insertErr);
+    // Si la tabla tiene constraint UNIQUE en email, manejarlo de forma amigable
+    const msg = (insertErr && insertErr.message) || '';
+    if (msg.toLowerCase().includes('unique') || msg.toLowerCase().includes('duplicate')) {
+      throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
+    }
     throw new Error('No se pudo crear el claim');
   }
   await logAccess(null, 'claim_created', { email, plan_id, token_created: true });
@@ -258,73 +260,18 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 }
 
 // ============================================
-// EMAIL: build templates & send
-function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail }) {
-  const logoPath = process.env.LOGO_URL || 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head><body style="margin:0;padding:0;background-color:#000000;">
-    <div style="color:#fff;font-family:Arial,Helvetica,sans-serif;padding:24px;text-align:center;">
-      <img src="${escapeHtml(logoPath)}" alt="NAZA" style="max-width:180px;border-radius:12px;margin-bottom:20px;"/>
-      <h1>¡Bienvenido a ${escapeHtml(planName)}!</h1>
-      <p>Hola ${escapeHtml(name || 'trader')},</p>
-      <p>Tu compra ha sido confirmada. Haz clic en el botón para conectar tu cuenta de Discord y activar tu acceso:</p>
-      <p><a href="${escapeHtml(claimUrl)}" style="display:inline-block;padding:12px 20px;background:#FBBF24;color:#000;text-decoration:none;border-radius:8px;font-weight:bold;">Activar acceso</a></p>
-      <p style="font-size:13px;color:#ccc;">Si el botón no funciona, copia y pega este enlace en tu navegador:</p>
-      <p style="font-size:12px;color:#aaa;word-break:break-all;">${escapeHtml(claimUrl)}</p>
-      <hr style="border:none;border-top:1px solid #333;margin:20px 0;"/>
-      <p style="font-size:12px;color:#999;">Soporte: <a href="mailto:${escapeHtml(supportEmail)}" style="color:#FBBF24;">${escapeHtml(supportEmail)}</a></p>
-    </div>
-  </body></html>`;
-}
-function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail, email }) {
-  return `Hola ${name || 'trader'},\n\nTu suscripción (${planName}) ha sido activada.\n\nActiva tu acceso conectando tu cuenta de Discord en este enlace:\n${claimUrl}\n\nSi necesitas ayuda, escribe a: ${supportEmail}\n\nNAZA Trading Academy`;
-}
-
-async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId, extra = {}, existingToken = null) {
-  if (!SENDGRID_API_KEY) throw new Error('SENDGRID_API_KEY no configurada');
-
-  const planNames = {
-    'plan_anual': 'Plan Anual 🔥',
-    'plan_trimestral': 'Plan Trimestral 📈',
-    'plan_mensual': 'Plan Mensual 💼',
-    'other': 'Plan'
-  };
-  const planKey = detectPlanKeyFromString(planId);
-  const planName = planNames[planKey] || 'Plan';
-
-  let token = existingToken;
-  if (!token) {
-    token = await createClaimToken({
-      email,
-      name,
-      plan_id: planId,
-      subscriptionId,
-      customerId,
-      last4: extra.last4,
-      cardExpiry: extra.cardExpiry,
-      extra
-    });
-  }
-
-  // Discord OAuth link usando el token como state (claim de un solo uso)
-  const claimUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)}`;
-
-  const msg = {
-    to: email,
-    from: FROM_EMAIL,
-    subject: `¡Bienvenido a NAZA Trading Academy! — Obtener acceso`,
-    text: buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email }),
-    html: buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL })
-  };
-  await sgMail.send(msg);
-  await logAccess(null, 'email_sent', { email, planId });
-}
-
-// ============================================
-// ROUTE: /webhook/whop (raw body required for signature verification)
-app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req, res) => {
+// WEBHOOK: WHOP (usamos bodyParser.raw para asegurar bytes exactos)
+app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    const rawBody = req.body; // Buffer
-    let signatureHeader = (req.headers['x-whop-signature'] || req.headers['x-signature'] || '').toString().trim();
+    // raw body como buffer garantizado por bodyParser.raw
+    const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
+
+    // Normalizar header de firma — soportamos prefijos comunes y formatos hex/base64
+    let signatureHeader = (req.headers['x-whop-signature'] || req.headers['x-signature'] || '').toString();
+    signatureHeader = signatureHeader.replace(/^sha256=/i, '')
+                                     .replace(/^sha1=/i, '')
+                                     .replace(/^v[0-9]+=|^signature=/i, '')
+                                     .trim();
 
     if (!WHOP_WEBHOOK_SECRET) {
       console.error('WHOP_WEBHOOK_SECRET no configurado');
@@ -336,475 +283,78 @@ app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req,
       return res.status(401).send('No signature');
     }
 
-    // Normalizar posibles prefijos: "sha256=xxxx", "v1=xxxx", etc.
-    signatureHeader = signatureHeader
-      .replace(/^sha256=/i, '')
-      .replace(/^sha1=/i, '')
-      .replace(/^v\d+=/i, '')
-      .trim();
-
-    // Validar que parezca un hex sha256 (64 chars)
-    if (!/^[a-f0-9]{64}$/i.test(signatureHeader)) {
-      console.warn('Signature header formato inválido:', signatureHeader.slice(0, 8));
-      await logAccess(null, 'webhook_invalid_signature_format', { sample: signatureHeader.slice(0, 8) });
-      return res.status(401).send('Invalid signature');
+    // Intentar decodificar header: primero hex, si falla probar base64
+    let headerBuf = null;
+    try {
+      headerBuf = Buffer.from(signatureHeader, 'hex');
+      if (headerBuf.length !== 32) {
+        // no es el hash sha256 en hex -> intentar base64
+        headerBuf = Buffer.from(signatureHeader, 'base64');
+      }
+    } catch (e) {
+      try {
+        headerBuf = Buffer.from(signatureHeader, 'base64');
+      } catch (e2) {
+        console.warn('Signature header formato inválido (ni hex ni base64)');
+        await logAccess(null, 'webhook_invalid_signature_format', { header_sample: signatureHeader.slice(0,8) });
+        return res.status(401).send('Invalid signature format');
+      }
     }
 
-    // compute HMAC-SHA256 hex
-    const computed = crypto.createHmac('sha256', WHOP_WEBHOOK_SECRET).update(rawBody).digest('hex');
-    const computedBuf = Buffer.from(computed, 'hex');
-    const headerBuf = Buffer.from(signatureHeader, 'hex');
+    const computed = crypto.createHmac('sha256', WHOP_WEBHOOK_SECRET).update(rawBody).digest();
 
-    if (computedBuf.length !== headerBuf.length) {
+    if (computed.length !== headerBuf.length) {
       console.warn('Signature length mismatch');
-      await logAccess(null, 'webhook_invalid_signature_length', { sample: signatureHeader.slice(0, 8) });
+      await logAccess(null, 'webhook_invalid_signature_length', { header_sample: signatureHeader.slice(0,8) });
       return res.status(401).send('Invalid signature');
     }
 
-    // compare (constant-time)
-    const signatureMatches = crypto.timingSafeEqual(computedBuf, headerBuf);
+    const signatureMatches = crypto.timingSafeEqual(computed, headerBuf);
     if (!signatureMatches) {
-      console.warn('Firma webhook inválida');
-      await logAccess(null, 'webhook_invalid_signature', { header: signatureHeader.slice(0,8) });
+      console.warn('Firma webhook inválida (muestra):', signatureHeader.slice(0,8));
+      await logAccess(null, 'webhook_invalid_signature', { header_sample: signatureHeader.slice(0,8) });
       return res.status(401).send('Invalid signature');
     }
 
-    // parse JSON safely
-    const payload = JSON.parse(rawBody.toString('utf8'));
-    // Support different event key names
-    const event = payload.event || payload.type || payload.kind || payload?.data?.event || null;
-    const data = payload.data || payload || {};
+    // Parseamos payload de forma segura
+    let payload = {};
+    try {
+      payload = JSON.parse(rawBody.toString('utf8'));
+    } catch (parseErr) {
+      payload = req.body || {};
+    }
+
+    const event = payload.event || payload.type || payload.kind || (payload.data && payload.data.event) || null;
     await logAccess(null, 'webhook_received', { event });
 
-    // Normalize fields
-    const orderId = data.order_id || data.id || (data.order && data.order.id) || null;
-    const subscriptionId = data.subscription_id || data.subscription?.id || null;
-    const status = data.status || data.payment_status || null;
-    const productId = data.product_id || data.product?.id || data.product_name || null;
-    const amount = data.amount || (data.order && data.order.amount) || null;
-    const currency = data.currency || (data.order && data.order.currency) || null;
-    const buyer = data.buyer || data.customer || {};
-    const email = (buyer.email || '').toString().trim().toLowerCase();
-    const last4 = (data.payment_method && data.payment_method.last4) || (buyer.last4) || (data.card_last4) || '';
+    // Aquí colocas la lógica adicional para procesar el evento
+    // p.ej: if (event === 'subscription.created') { ... }
 
-    // Idempotency: check if we already processed this order
-    if (orderId) {
-      const { data: existing, error: exErr } = await supabase
-        .from('webhook_events')
-        .select('id')
-        .eq('order_id', orderId)
-        .limit(1);
-      if (exErr) console.warn('exErr checking webhook_events:', exErr);
-      if (existing && existing.length > 0) {
-        // Already received — respond 200
-        await logAccess(null, 'webhook_duplicate', { orderId });
-        return res.status(200).send('already processed');
-      }
-      // persist basic event to avoid races
-      await supabase
-        .from('webhook_events')
-        .insert([{
-          order_id: orderId,
-          subscription_id: subscriptionId,
-          event: event || status || 'unknown',
-          raw: payload,
-          received_at: new Date().toISOString()
-        }])
-        .catch(err => {
-          console.warn('No se pudo persistir webhook_events (continuamos):', err?.message || err);
-        });
-    }
-
-    const eventLower = (event || '').toString().toLowerCase();
-
-    // Handle main events: pago completado / membership activada
-    if (
-      eventLower.includes('payment_succeeded') ||
-      eventLower.includes('order.paid') ||
-      eventLower.includes('order_paid') ||
-      eventLower.includes('membership_activated') ||
-      eventLower.includes('payment_succeeded_v2') ||
-      eventLower.includes('paid')
-    ) {
-      // ✅ EMAIL ES EL ÚNICO REQUISITO FIJO
-      if (!email) {
-        await logAccess(null, 'webhook_missing_email', { orderId, subscriptionId });
-        return res.status(400).send('Missing email');
-      }
-
-      try {
-        // Idempotencia por email: si ya hay membership activa, no hacemos nada
-        const { data: members, error: memErr } = await supabase
-          .from('memberships')
-          .select('id,status')
-          .eq('email', email)
-          .limit(1);
-        if (memErr) console.warn('memErr checking membership in webhook:', memErr);
-        if (members && members.length > 0 && members[0].status === 'active') {
-          await logAccess(null, 'webhook_noop_member_already_active', { email, orderId });
-          return res.status(200).send('member already active');
-        }
-
-        // Intentar reusar claim por subscription/order o crear uno nuevo
-        const { data: existingClaims } = await supabase
-          .from('claims')
-          .select('*')
-          .or(subscriptionId
-              ? `subscription_id.eq.${subscriptionId},extra.like.%order:${orderId}%`
-              : `extra.like.%order:${orderId}%`)
-          .limit(1);
-
-        let token = null;
-        if (existingClaims && existingClaims.length > 0) {
-          token = existingClaims[0].token;
-          if (existingClaims[0].used) {
-            await logAccess(null, 'webhook_claim_already_used', { email, orderId });
-            return res.status(200).send('claim already used');
-          }
-        } else {
-          // crear claim (plan_id = productId opcional)
-          token = await createClaimToken({
-            email,
-            name: buyer.full_name || buyer.name || '',
-            plan_id: productId || '',
-            subscriptionId,
-            customerId: buyer.id || '',
-            last4,
-            cardExpiry: data.card_expiry || '',
-            extra: { order: orderId }
-          });
-          // anotar orderId en extra (best-effort)
-          await supabase
-            .from('claims')
-            .update({ extra: JSON.stringify({ order: orderId }) })
-            .eq('token', token)
-            .catch(()=>{});
-        }
-
-        // enviar email con link de activación (Discord OAuth + claim de un solo uso)
-        sendWelcomeEmail(
-          email,
-          buyer.full_name || '',
-          productId || '',
-          subscriptionId,
-          buyer.id || '',
-          { last4, cardExpiry: data.card_expiry || '' },
-          token
-        )
-          .then(()=> logAccess(null, 'webhook_email_dispatched', { email, orderId }))
-          .catch(err => logAccess(null, 'webhook_email_failed', { email, orderId, err: err?.message || err }));
-
-        return res.status(200).send('ok');
-      } catch (err) {
-        console.error('Error processing payment_succeeded webhook:', err?.message || err);
-        await logAccess(null, 'webhook_processing_error', { err: err?.message || err });
-        return res.status(500).send('error processing');
-      }
-    }
-
-    // cancellation / deactivation → quitar rol (no kick)
-    if (
-      eventLower.includes('subscription.cancelled') ||
-      eventLower.includes('subscription_cancelled') ||
-      eventLower.includes('membership_deactivated') ||
-      eventLower.includes('order_refunded') ||
-      eventLower.includes('cancel')
-    ) {
-      try {
-        const lookup = subscriptionId ? { subscription_id: subscriptionId } : (orderId ? { order_id: orderId } : null);
-        if (!lookup) {
-          await logAccess(null, 'webhook_cancel_no_lookup', { event, orderId, subscriptionId });
-          return res.status(200).send('no lookup keys');
-        }
-        const { data: rows } = await supabase
-          .from('memberships')
-          .select('*')
-          .or(`subscription_id.eq.${subscriptionId},order_id.eq.${orderId}`)
-          .limit(1);
-        if (rows && rows.length > 0) {
-          const row = rows[0];
-          // revoke role if exists (sin sacar al usuario del servidor)
-          if (row.discord_id && row.role_id) {
-            try {
-              const guild = await discordClient.guilds.fetch(GUILD_ID);
-              const member = await guild.members.fetch(row.discord_id);
-              await member.roles.remove(row.role_id).catch(err => { throw err; });
-              await logAccess(row.id, 'role_revoked', { discord_id: row.discord_id, role_id: row.role_id });
-            } catch (err) {
-              console.warn('Could not revoke role immediately:', err?.message || err);
-              await logAccess(row.id, 'role_revocation_failed', { err: err?.message || err });
-            }
-          }
-          // update membership status
-          await supabase
-            .from('memberships')
-            .update({ status: 'cancelled', revoked_at: new Date().toISOString() })
-            .eq('id', row.id);
-          return res.status(200).send('cancelled processed');
-        } else {
-          await logAccess(null, 'webhook_cancel_no_membership_found', { subscriptionId, orderId });
-          return res.status(200).send('no membership found');
-        }
-      } catch (err) {
-        console.error('Error processing cancel webhook:', err?.message || err);
-        return res.status(500).send('error processing cancel');
-      }
-    }
-
-    // default
-    await logAccess(null, 'webhook_unhandled', { event });
-    return res.status(200).send('ignored');
+    return res.status(200).send('ok');
   } catch (err) {
     console.error('❌ Error general en /webhook/whop:', err?.message || err);
     return res.status(500).send('internal error');
   }
 });
 
-// ============================================
-// ROUTE: claim redirect
-app.get('/api/auth/claim', async (req, res) => {
-  const token = req.query.token;
-  if (!token) return res.status(400).send('Token missing');
-  try {
-    const { data: rows, error } = await supabase
-      .from('claims')
-      .select('id,token,used')
-      .eq('token', token)
-      .limit(1);
-    if (error) {
-      console.error('Error leyendo claim:', error);
-      return res.status(500).send('Error interno');
-    }
-    if (!rows || rows.length === 0) return res.status(400).send('Enlace inválido. Contacta soporte.');
-    const claimRow = rows[0];
-    if (claimRow.used) return res.status(400).send('Este enlace ya fue utilizado.');
-
-    const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
-    const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
-    const scope = encodeURIComponent('identify guilds.join');
-    const prompt = 'consent';
-    const discordAuthUrl =
-      `https://discord.com/api/oauth2/authorize?client_id=${clientId}` +
-      `&redirect_uri=${redirectUri}` +
-      `&response_type=code` +
-      `&scope=${scope}` +
-      `&state=${encodeURIComponent(token)}` +
-      `&prompt=${prompt}`;
-
-    return res.redirect(discordAuthUrl);
-  } catch (err) {
-    console.error('❌ Error en /api/auth/claim:', err);
-    return res.status(500).send('Error interno');
-  }
-});
-
-// ============================================
-// ROUTE: DISCORD CALLBACK (improved checks + idempotency)
-app.get('/discord/callback', async (req, res) => {
-  try {
-    const { code, state } = req.query;
-    if (!code || !state) return res.status(400).send('Faltan parámetros');
-
-    // Retrieve auth data from pendingAuths or claims
-    let authData = pendingAuths.get(state);
-    let claimData = null;
-    if (!authData) {
-      const { data: claimsRows, error: claimErr } = await supabase
-        .from('claims')
-        .select('*')
-        .eq('token', state)
-        .limit(1);
-      if (claimErr) console.error('Error leyendo claim de Supabase:', claimErr);
-      else if (claimsRows && claimsRows.length > 0) claimData = claimsRows[0];
-      if (claimData) {
-        if (claimData.used) return res.status(400).send('Este enlace ya fue usado.');
-        authData = {
-          email: claimData.email,
-          name: claimData.name,
-          plan_id: claimData.plan_id,
-          subscription_id: claimData.subscription_id,
-          customer_id: claimData.customer_id,
-          last4: claimData.last4,
-          card_expiry: claimData.card_expiry
-        };
-      }
-    }
-    if (!authData) return res.status(400).send('Sesión expirada o inválida');
-
-    // Exchange code for token
-    const params = new URLSearchParams({
-      client_id: DISCORD_CLIENT_ID,
-      client_secret: DISCORD_CLIENT_SECRET,
-      grant_type: 'authorization_code',
-      code: code,
-      redirect_uri: DISCORD_REDIRECT_URL
-    });
-    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString()
-    });
-    const tokenData = await tokenResponse.json();
-    if (!tokenData.access_token) {
-      console.error('❌ Error obteniendo token:', tokenData);
-      return res.status(400).send('Error de autorización');
-    }
-
-    // Get user info
-    const userResponse = await fetch('https://discord.com/api/users/@me', {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` }
-    });
-    const userData = await userResponse.json();
-    const discordId = userData.id;
-    const discordUsername = userData.username;
-
-    // Add to guild (invite via OAuth2). Best-effort (may fail if already in guild)
-    try {
-      await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ access_token: tokenData.access_token })
-      }).catch(err => console.warn('Invite add maybe failed:', err?.message || err));
-    } catch (err) {
-      console.warn('Invite to guild failed:', err?.message || err);
-    }
-
-    // Determine role basado en CUALQUIER texto del plan/producto
-    const roleId = (function getRoleIdForPlan(planId) {
-      const planKey = detectPlanKeyFromString(planId);
-      const mapping = {
-        'plan_mensual': ROLE_ID_SENALESDISCORD,
-        'plan_trimestral': ROLE_ID_MENTORIADISCORD,
-        'plan_anual': ROLE_ID_ANUALDISCORD
-      };
-      return mapping[planKey] || ROLE_ID_SENALESDISCORD;
-    })(authData.plan_id);
-
-    // BEFORE inserting: check conflicts (email/clan/last4) among active memberships
-    const email = (authData.email || '').toLowerCase().trim();
-    const last4 = authData.last4 || '';
-    // check email conflict
-    const { data: existingByEmail } = await supabase
-      .from('memberships')
-      .select('id,status')
-      .eq('email', email)
-      .eq('status','active')
-      .limit(1);
-    if (existingByEmail && existingByEmail.length > 0) {
-      await logAccess(null, 'conflict_detected', { reason: 'email_active', email });
-      await supabase.from('claims').update({ manual_review: true }).eq('token', state).catch(()=>{});
-      return res.status(400).send('Conflicto: este correo ya tiene una membresía activa. Contacta soporte.');
-    }
-    // check last4 conflict
-    if (last4 && last4.trim() !== '') {
-      const { data: last4Rows } = await supabase
-        .from('memberships')
-        .select('email,status')
-        .eq('last4', last4)
-        .eq('status','active')
-        .limit(2);
-      if (last4Rows && last4Rows.length > 0) {
-        const setEmails = new Set((last4Rows || []).map(r => (r.email || '').toLowerCase()));
-        if (!setEmails.has(email) && setEmails.size >= 1) {
-          await logAccess(null, 'conflict_detected', { reason: 'last4_conflict', last4, email });
-          await supabase.from('claims').update({ manual_review: true }).eq('token', state).catch(()=>{});
-          return res.status(400).send('Conflicto: tarjeta asociada a otra cuenta. Contacta soporte.');
-        }
-      }
-    }
-
-    // No conflicts detected -> proceed to insert membership
-    const membershipRow = {
-      email,
-      name: authData.name,
-      plan_id: authData.plan_id,
-      subscription_id: authData.subscription_id,
-      customer_id: authData.customer_id,
-      discord_id: discordId,
-      discord_username: discordUsername,
-      status: 'active',
-      role_id: roleId,
-      last4: authData.last4 || '',
-      card_expiry: authData.card_expiry || '',
-      created_at: new Date().toISOString()
-    };
-
-    try {
-      const { error: insErr } = await supabase.from('memberships').insert(membershipRow);
-      if (insErr) {
-        console.error('❌ Error guardando en Supabase memberships:', insErr);
-        await supabase.from('claims').update({ manual_review: true }).eq('token', state).catch(()=>{});
-        return res.status(500).send('No se pudo crear la membresía. Contacta soporte.');
-      }
-      await logAccess(null, 'membership_created', { email, discordId, plan: authData.plan_id });
-    } catch (err) {
-      console.error('❌ Error con Supabase (memberships):', err);
-      return res.status(500).send('Error interno');
-    }
-
-    // mark claim used (if claim existed)
-    if (claimData) {
-      await supabase
-        .from('claims')
-        .update({ used: true, used_at: new Date().toISOString() })
-        .eq('token', state)
-        .catch(err => {
-          console.warn('No se pudo marcar claim como usado:', err?.message || err);
-        });
-      await logAccess(null, 'claim_marked_used', { token: state });
-    }
-
-    // Assign role with retry/backoff
-    let roleAssigned = false;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        const guild = await discordClient.guilds.fetch(GUILD_ID);
-        const member = await guild.members.fetch(discordId);
-        await member.roles.add(roleId);
-        roleAssigned = true;
-        await logAccess(null, 'role_assigned', { discordId, roleId });
-        break;
-      } catch (err) {
-        console.warn(`Attempt ${attempt+1} failed assigning role:`, err?.message || err);
-        await logAccess(null, 'role_assign_failed', { attempt: attempt+1, err: err?.message || err });
-        await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
-      }
-    }
-    if (!roleAssigned) {
-      await logAccess(null, 'role_assign_permanent_fail', { discordId, roleId });
-    }
-
-    if (pendingAuths.has(state)) pendingAuths.delete(state);
-
-    const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg/sXjU5ZVzXU';
-    return res.send(`
-      <!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
-      <body style="font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-        <div style="background:rgba(255,255,255,0.08);padding:32px;border-radius:12px;text-align:center;">
-          <h1>🎉 ¡Bienvenido!</h1>
-          <p>Tu rol ha sido asignado correctamente. Serás redirigido en unos segundos...</p>
-          <a href="${successRedirect}" style="display:inline-block;margin-top:12px;padding:12px 20px;border-radius:8px;background:#fff;color:#667eea;text-decoration:none;font-weight:bold;">Ir a Discord</a>
-        </div>
-        <script>setTimeout(()=>{ window.location.href='${successRedirect}' }, 3000);</script>
-      </body></html>`);
-  } catch (error) {
-    console.error('❌ Error en callback:', error?.message || error);
-    return res.status(500).send('Error procesando la autorización');
-  }
-});
-
-// ============================================
-// HEALTH CHECK
+// Liveness endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  return res.status(200).json({ ok: true, uptime: process.uptime(), ts: new Date().toISOString() });
 });
 
 // ============================================
-// START
-app.listen(PORT, () => {
+// Manejo global de errores del proceso
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception thrown:', err);
+  // En producción podrías reiniciar el proceso
+});
+
+// ============================================
+// START SERVER
+app.listen(PORT, '0.0.0.0', () => {
   console.log('🚀 NAZA Bot - servidor iniciado');
   console.log('🌐 Puerto:', PORT);
   console.log('🔗 URL:', BASE_URL);
