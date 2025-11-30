@@ -1,4 +1,4 @@
-// server.js - NAZA Bot (versión revisada)
+// server.js - NAZA Bot (versión revisada y con lógica WHOP+Discord)
 // Requisitos: Node >= 18 recomendado (por global.fetch), instalar dependencias:
 // npm i express body-parser @supabase/supabase-js discord.js @sendgrid/mail helmet express-rate-limit
 
@@ -55,10 +55,9 @@ if (missing.length > 0) {
 }
 
 // ============================================
-// MIDDLEWARES GENERALES
+// MIDDLEWARES GENERALES (ANTES del JSON parser)
 app.use(helmet());
 
-// Rate limiter (ajusta según tu tráfico)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 300,
@@ -67,11 +66,6 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// parse JSON para rutas normales (NO para webhook raw)
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// ============================================
 // Utiles globales
 const pendingAuths = new Map();
 
@@ -81,7 +75,6 @@ function escapeHtml(str) {
 }
 function emailSafe(e){ return e || ''; }
 
-// ============================================
 // CORS Dinámico (compat con credentials)
 // NOTA: en producción define ALLOWED_ORIGINS explícitamente
 app.use((req, res, next) => {
@@ -90,7 +83,6 @@ app.use((req, res, next) => {
 
   if (origin) {
     if (ALLOWED_ORIGINS.length === 0) {
-      // En ausencia de whitelist permitimos origen dinámico (cuidado con credentials)
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
     } else {
@@ -98,7 +90,6 @@ app.use((req, res, next) => {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
       }
-      // si no está en whitelist, no añadimos CORS headers (browser bloqueará)
     }
   } else {
     if (ALLOWED_ORIGINS.length === 0) {
@@ -112,7 +103,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ============================================
 // FRONTEND AUTH MIDDLEWARE
 function authenticateFrontend(req, res, next) {
   const token = req.headers['x-frontend-token'];
@@ -139,7 +129,6 @@ try {
   console.warn('⚠️ No se pudo inicializar Supabase:', e?.message || e);
 }
 
-// ============================================
 // SENDGRID
 if (!SENDGRID_API_KEY) {
   console.warn('⚠️ SENDGRID_API_KEY no definido. Los correos no podrán enviarse.');
@@ -147,7 +136,6 @@ if (!SENDGRID_API_KEY) {
   sgMail.setApiKey(SENDGRID_API_KEY);
 }
 
-// ============================================
 // DISCORD CLIENT (opcional)
 const discordClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 if (DISCORD_BOT_TOKEN) {
@@ -166,15 +154,142 @@ if (DISCORD_BOT_TOKEN) {
 async function logAccess(membership_id = null, event_type = 'generic', detail = {}) {
   try {
     if (!supabase) throw new Error('Supabase no inicializado');
-    await supabase.from('access_logs').insert([{ membership_id, event_type, detail: JSON.stringify(detail || {}), created_at: new Date().toISOString() }]);
+    await supabase.from('access_logs').insert([{
+      membership_id,
+      event_type,
+      detail: JSON.stringify(detail || {}),
+      created_at: new Date().toISOString()
+    }]);
   } catch (err) {
-    // No rompas flujo por logging
     console.warn('⚠️ No se pudo insertar access_log:', err?.message || err);
   }
 }
 
 // ============================================
-// createClaimToken (mejor manejo de errores y race handling)
+// Funciones de ayuda para memberships / Discord
+
+async function findMembership({ customerId, subscriptionId, email }) {
+  if (!supabase) return null;
+  try {
+    // 1) customer_id
+    if (customerId) {
+      const { data, error } = await supabase
+        .from('memberships')
+        .select('id, email, discord_id, plan_id')
+        .eq('customer_id', customerId)
+        .limit(1);
+      if (!error && data && data.length) return data[0];
+    }
+    // 2) subscription_id
+    if (subscriptionId) {
+      const { data, error } = await supabase
+        .from('memberships')
+        .select('id, email, discord_id, plan_id')
+        .eq('subscription_id', subscriptionId)
+        .limit(1);
+      if (!error && data && data.length) return data[0];
+    }
+    // 3) email
+    if (email) {
+      const { data, error } = await supabase
+        .from('memberships')
+        .select('id, email, discord_id, plan_id')
+        .eq('email', email.toLowerCase())
+        .limit(1);
+      if (!error && data && data.length) return data[0];
+    }
+  } catch (e) {
+    console.warn('findMembership error:', e?.message || e);
+  }
+  return null;
+}
+
+// Detectar rol Discord según plan_id
+function resolveRoleIdForPlan(plan_id) {
+  if (!plan_id) return null;
+  const p = String(plan_id).toLowerCase();
+  if (p.includes('anual') || p.includes('year') || p.includes('annual') || p === 'plan_anual') {
+    return ROLE_ID_ANUAL;
+  }
+  if (p.includes('trimes') || p.includes('quarter') || p === 'plan_trimestral') {
+    return ROLE_ID_TRIMESTRAL;
+  }
+  // por defecto todo lo que parezca mensual
+  if (p.includes('mensual') || p.includes('month') || p === 'plan_mensual') {
+    return ROLE_ID_MENSUAL;
+  }
+  return null;
+}
+
+async function grantRoleInDiscord({ discord_id, plan_id, event }) {
+  if (!discordClient || !DISCORD_BOT_TOKEN || !GUILD_ID) {
+    console.warn('Discord no configurado correctamente, no se puede dar rol.');
+    return;
+  }
+  if (!discord_id) {
+    console.warn('Membership sin discord_id, no se puede dar rol.');
+    return;
+  }
+  try {
+    const guild = await discordClient.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(discord_id).catch(() => null);
+    if (!member) {
+      console.warn('Miembro de Discord no encontrado para dar rol:', discord_id);
+      return;
+    }
+
+    const roleId = resolveRoleIdForPlan(plan_id) || ROLE_ID_MENSUAL || ROLE_ID_TRIMESTRAL || ROLE_ID_ANUAL;
+    if (!roleId) {
+      console.warn('No hay ROLE_ID configurado para el plan_id:', plan_id);
+      return;
+    }
+
+    if (!member.roles.cache.has(roleId)) {
+      await member.roles.add(roleId).catch(err => {
+        console.warn('No se pudo agregar rol:', roleId, err?.message || err);
+      });
+      console.log(`✅ Rol ${roleId} agregado a ${discord_id} por evento ${event}`);
+    } else {
+      console.log(`ℹ️ ${discord_id} ya tenía el rol ${roleId}`);
+    }
+  } catch (err) {
+    console.error('Error grantRoleInDiscord:', err?.message || err);
+  }
+}
+
+async function revokeRolesInDiscord({ discord_id, event }) {
+  if (!discordClient || !DISCORD_BOT_TOKEN || !GUILD_ID) {
+    console.warn('Discord no configurado correctamente, no se puede quitar rol.');
+    return;
+  }
+  if (!discord_id) {
+    console.warn('Membership sin discord_id, no se puede quitar rol.');
+    return;
+  }
+  try {
+    const guild = await discordClient.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(discord_id).catch(() => null);
+    if (!member) {
+      console.warn('Miembro de Discord no encontrado para quitar rol:', discord_id);
+      return;
+    }
+
+    const rolesToTry = [ROLE_ID_MENSUAL, ROLE_ID_TRIMESTRAL, ROLE_ID_ANUAL].filter(Boolean);
+    for (const rid of rolesToTry) {
+      if (member.roles.cache.has(rid)) {
+        await member.roles.remove(rid).catch(err => {
+          console.warn('No se pudo remover rol', rid, err?.message || err);
+        });
+      }
+    }
+    console.log(`✅ Roles de acceso revocados a ${discord_id} por evento ${event}`);
+  } catch (err) {
+    console.error('Error revokeRolesInDiscord:', err?.message || err);
+  }
+}
+
+// ============================================
+// createClaimToken (igual que tenías)
 async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra = {} }) {
   email = (email || '').trim().toLowerCase();
   if (!email) throw new Error('Email requerido para crear claim');
@@ -229,8 +344,7 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   if (recheckMembership && recheckMembership.length > 0) throw new Error('Este correo ya está registrado');
   if (recheckClaim && recheckClaim.length > 0) throw new Error('Existe ya una solicitud para este correo. Revisa tu email.' );
 
-  // generate token
-  const token = crypto.randomBytes(24).toString('hex'); // 48 chars
+  const token = crypto.randomBytes(24).toString('hex');
   const row = {
     token,
     email,
@@ -248,7 +362,6 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   const { data: insertData, error: insertErr } = await supabase.from('claims').insert([row]);
   if (insertErr) {
     console.error('Error insertando claim:', insertErr);
-    // Si la tabla tiene constraint UNIQUE en email, manejarlo de forma amigable
     const msg = (insertErr && insertErr.message) || '';
     if (msg.toLowerCase().includes('unique') || msg.toLowerCase().includes('duplicate')) {
       throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
@@ -260,13 +373,16 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 }
 
 // ============================================
-// WEBHOOK: WHOP (usamos bodyParser.raw para asegurar bytes exactos)
+// WEBHOOK: WHOP (raw bytes para HMAC)
 app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    // raw body como buffer garantizado por bodyParser.raw
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
 
-    // Normalizar header de firma — soportamos prefijos comunes y formatos hex/base64
+    // Logs simples para que tú veas qué manda WHOP
+    console.log('FIRMA WHOP:', req.headers['x-whop-signature'] || req.headers['x-signature']);
+    console.log('PAYLOAD WHOP (inicio):', rawBody.toString('utf8').slice(0, 400));
+
+    // Normalizar header de firma
     let signatureHeader = (req.headers['x-whop-signature'] || req.headers['x-signature'] || '').toString();
     signatureHeader = signatureHeader.replace(/^sha256=/i, '')
                                      .replace(/^sha1=/i, '')
@@ -283,12 +399,11 @@ app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (r
       return res.status(401).send('No signature');
     }
 
-    // Intentar decodificar header: primero hex, si falla probar base64
+    // Intentar decodificar header: hex o base64
     let headerBuf = null;
     try {
       headerBuf = Buffer.from(signatureHeader, 'hex');
       if (headerBuf.length !== 32) {
-        // no es el hash sha256 en hex -> intentar base64
         headerBuf = Buffer.from(signatureHeader, 'base64');
       }
     } catch (e) {
@@ -316,7 +431,7 @@ app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (r
       return res.status(401).send('Invalid signature');
     }
 
-    // Parseamos payload de forma segura
+    // Parse payload
     let payload = {};
     try {
       payload = JSON.parse(rawBody.toString('utf8'));
@@ -325,10 +440,67 @@ app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (r
     }
 
     const event = payload.event || payload.type || payload.kind || (payload.data && payload.data.event) || null;
-    await logAccess(null, 'webhook_received', { event });
+    const data = payload.data || payload || {};
 
-    // Aquí colocas la lógica adicional para procesar el evento
-    // p.ej: if (event === 'subscription.created') { ... }
+    // Extraer IDs típicos de WHOP
+    const customerId = data.customer_id || data.customer?.id || data.user_id || null;
+    const subscriptionId = data.subscription_id || data.subscription?.id || null;
+    const email = data.customer?.email || data.email || null;
+
+    await logAccess(null, 'webhook_received', { event, customerId, subscriptionId, email });
+
+    // Eventos para DAR acceso
+    const grantEvents = new Set([
+      'subscription.created',
+      'subscription.activated',
+      'subscription.started',
+      'access.granted'
+    ]);
+
+    // Eventos para QUITAR acceso
+    const revokeEvents = new Set([
+      'subscription.deleted',
+      'subscription.canceled',
+      'subscription.cancelled',
+      'subscription.ended',
+      'invoice.refund',
+      'refund.created'
+    ]);
+
+    const status = String(
+      data.status ||
+      (data.subscription && data.subscription.status) ||
+      ''
+    ).toLowerCase();
+
+    const isRevokeByStatus = (
+      event === 'subscription.updated' ||
+      event === 'subscription.status_changed'
+    ) && ['canceled','cancelled','expired','past_due'].includes(status);
+
+    const isGrant = grantEvents.has(event);
+    const isRevoke = revokeEvents.has(event) || isRevokeByStatus;
+
+    if (isGrant || isRevoke) {
+      const membership = await findMembership({ customerId, subscriptionId, email });
+      if (!membership) {
+        console.warn('No se encontró membership para WHOP:', { customerId, subscriptionId, email });
+        await logAccess(null, 'webhook_no_membership_found', { event, customerId, subscriptionId, email });
+      } else {
+        // DAR ACCESO
+        if (isGrant) {
+          await grantRoleInDiscord({ discord_id: membership.discord_id, plan_id: membership.plan_id, event });
+          await logAccess(membership.id, 'access_granted', { event, membership_id: membership.id });
+        }
+        // QUITAR ACCESO
+        if (isRevoke) {
+          await revokeRolesInDiscord({ discord_id: membership.discord_id, event });
+          await logAccess(membership.id, 'access_revoked', { event, membership_id: membership.id });
+        }
+      }
+    } else {
+      await logAccess(null, 'webhook_ignored_event', { event });
+    }
 
     return res.status(200).send('ok');
   } catch (err) {
@@ -337,22 +509,24 @@ app.post('/webhook/whop', bodyParser.raw({ type: 'application/json' }), async (r
   }
 });
 
+// ============================================
+// AHORA sí parse JSON para el RESTO de rutas
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 // Liveness endpoint
 app.get('/health', (req, res) => {
   return res.status(200).json({ ok: true, uptime: process.uptime(), ts: new Date().toISOString() });
 });
 
-// ============================================
 // Manejo global de errores del proceso
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception thrown:', err);
-  // En producción podrías reiniciar el proceso
 });
 
-// ============================================
 // START SERVER
 app.listen(PORT, '0.0.0.0', () => {
   console.log('🚀 NAZA Bot - servidor iniciado');
