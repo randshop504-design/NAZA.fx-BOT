@@ -1,4 +1,3 @@
-// index.js - NAZA (reparado)
 // Node >=18 required
 const express = require('express');
 const { Client, GatewayIntentBits } = require('discord.js');
@@ -172,16 +171,17 @@ function detectPlanKeyFromString(planIdRaw) {
 }
 
 // ============================================
-// CLAIMS + VALIDATIONS (createClaimToken adapted, no debug logs)
+// CLAIMS + VALIDATIONS (createClaimToken adapted, con lógica de re-compra tras cancelación)
 async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra = {} }) {
   email = (email || '').trim().toLowerCase();
   if (!email) throw new Error('Email requerido para crear claim');
 
-  // 1) verificar membership existente
+  // 1) verificar membership existente SOLO si está activa
   const { data: existingMembership, error: memErr } = await supabase
     .from('memberships')
-    .select('id')
+    .select('id, status')
     .eq('email', email)
+    .eq('status', 'active')
     .limit(1);
   if (memErr) {
     console.error('Error consultando memberships:', memErr);
@@ -194,11 +194,12 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     throw new Error('Este correo ya está registrado');
   }
 
-  // 2) verificar claim pendiente
+  // 2) verificar claim pendiente (solo used = false)
   const { data: existingClaimsForEmail, error: claimErr } = await supabase
     .from('claims')
     .select('id, used')
     .eq('email', email)
+    .eq('used', false)
     .limit(1);
   if (claimErr) {
     console.error('Error consultando claims por email:', claimErr);
@@ -208,11 +209,21 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
   }
 
-  // 3) verificar uso de tarjeta (no permitir >2 correos distintos)
+  // 3) verificar uso de tarjeta (no permitir >2 correos distintos entre memberships activas y claims pendientes)
   if (last4 && last4.toString().trim() !== '') {
     const [{ data: mRows, error: mErr }, { data: cRows, error: cErr }] = await Promise.all([
-      supabase.from('memberships').select('email').eq('last4', last4).eq('card_expiry', cardExpiry || ''),
-      supabase.from('claims').select('email').eq('last4', last4).eq('card_expiry', cardExpiry || '')
+      supabase
+        .from('memberships')
+        .select('email, status')
+        .eq('last4', last4)
+        .eq('card_expiry', cardExpiry || '')
+        .eq('status', 'active'),
+      supabase
+        .from('claims')
+        .select('email, used')
+        .eq('last4', last4)
+        .eq('card_expiry', cardExpiry || '')
+        .eq('used', false)
     ]);
     if (mErr) console.warn('mErr checking card:', mErr);
     if (cErr) console.warn('cErr checking card:', cErr);
@@ -225,10 +236,20 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     }
   }
 
-  // Recheck quick to reduce race
+  // Recheck quick to reduce race (mismas reglas: solo active + claims pendientes)
   const [{ data: recheckMembership }, { data: recheckClaim }] = await Promise.all([
-    supabase.from('memberships').select('id').eq('email', email).limit(1),
-    supabase.from('claims').select('id,used').eq('email', email).limit(1)
+    supabase
+      .from('memberships')
+      .select('id, status')
+      .eq('email', email)
+      .eq('status', 'active')
+      .limit(1),
+    supabase
+      .from('claims')
+      .select('id,used')
+      .eq('email', email)
+      .eq('used', false)
+      .limit(1)
   ]);
   if (recheckMembership && recheckMembership.length > 0) throw new Error('Este correo ya está registrado');
   if (recheckClaim && recheckClaim.length > 0) throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
