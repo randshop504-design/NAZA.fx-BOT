@@ -436,57 +436,25 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 }
 
 // ============================================
-// ROUTE: /webhook/whop (raw body required for signature verification)
+// ROUTE: /webhook/whop (signature verification REMOVED)
 app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     const rawBody = req.body; // Buffer
-    let signatureHeader = (req.headers['x-whop-signature'] || req.headers['x-signature'] || '').toString().trim();
-
-    if (!WHOP_WEBHOOK_SECRET) {
-      console.error('WHOP_WEBHOOK_SECRET no configurado');
-      return res.status(500).send('Server misconfigured');
-    }
-    if (!signatureHeader) {
-      console.warn('Webhook sin signature header');
-      await logAccess(null, 'webhook_no_signature', {});
-      return res.status(401).send('No signature');
+    // NOTE: signature verification intentionally removed per request.
+    if (!rawBody || rawBody.length === 0) {
+      await logAccess(null, 'webhook_empty_body', {});
+      return res.status(400).send('Empty body');
     }
 
-    // Normalizar posibles prefijos: "sha256=xxxx", "v1=xxxx", etc.
-    signatureHeader = signatureHeader
-      .replace(/^sha256=/i, '')
-      .replace(/^sha1=/i, '')
-      .replace(/^v\d+=/i, '')
-      .trim();
-
-    // Validar que parezca un hex sha256 (64 chars)
-    if (!/^[a-f0-9]{64}$/i.test(signatureHeader)) {
-      console.warn('Signature header formato inválido:', signatureHeader.slice(0, 8));
-      await logAccess(null, 'webhook_invalid_signature_format', { sample: signatureHeader.slice(0, 8) });
-      return res.status(401).send('Invalid signature');
+    let payload;
+    try {
+      payload = JSON.parse(rawBody.toString('utf8'));
+    } catch (err) {
+      console.error('Webhook: invalid JSON body', err?.message || err);
+      await logAccess(null, 'webhook_invalid_json', {});
+      return res.status(400).send('Invalid JSON');
     }
 
-    // compute HMAC-SHA256 hex
-    const computed = crypto.createHmac('sha256', WHOP_WEBHOOK_SECRET).update(rawBody).digest('hex');
-    const computedBuf = Buffer.from(computed, 'hex');
-    const headerBuf = Buffer.from(signatureHeader, 'hex');
-
-    if (computedBuf.length !== headerBuf.length) {
-      console.warn('Signature length mismatch');
-      await logAccess(null, 'webhook_invalid_signature_length', { sample: signatureHeader.slice(0, 8) });
-      return res.status(401).send('Invalid signature');
-    }
-
-    // compare (constant-time)
-    const signatureMatches = crypto.timingSafeEqual(computedBuf, headerBuf);
-    if (!signatureMatches) {
-      console.warn('Firma webhook inválida');
-      await logAccess(null, 'webhook_invalid_signature', { header: signatureHeader.slice(0,8) });
-      return res.status(401).send('Invalid signature');
-    }
-
-    // parse JSON safely
-    const payload = JSON.parse(rawBody.toString('utf8'));
     // Support different event key names
     const event = payload.event || payload.type || payload.kind || payload?.data?.event || null;
     const data = payload.data || payload || {};
