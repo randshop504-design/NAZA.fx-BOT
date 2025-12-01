@@ -8,9 +8,7 @@ const crypto = require('crypto');
 const fetch = global.fetch || require('node-fetch');
 const app = express();
 
-// NOTE: keep JSON parsing global except for raw webhook route
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// NOTE: we intentionally DO NOT call express.json() / urlencoded() here so the webhook route can receive raw body
 
 // ============================================
 // CONFIGURACIÓN (variables de entorno)
@@ -21,9 +19,10 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL;
 const GUILD_ID = process.env.GUILD_ID;
-const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD;
-const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD;
-const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD;
+// Support both sets of names: prefer PANEL names (ROLE_ID_ANUAL, ROLE_ID_MENSUAL, ROLE_ID_TRIMESTRAL)
+const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUAL || process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUALDISCORD;
+const ROLE_ID_MENSUAL = process.env.ROLE_ID_MENSUAL || process.env.ROLE_ID_MENSUALDISCORD || process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_SENALES || process.env.ROLE_ID_MENSUAL;
+const ROLE_ID_TRIMESTRAL = process.env.ROLE_ID_TRIMESTRAL || process.env.ROLE_ID_TRIMESTRALDISCORD || process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
@@ -368,31 +367,7 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 }
 
 function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail, email, token }) {
-  return `Hola ${name || 'usuario'}, ¡Bienvenido a NAZA Trading Academy!
-
-Tu suscripción ha sido activada correctamente.
-
-Entrega del servicio:
-Todos los privilegios de tu plan —cursos, clases en vivo, análisis y canales exclusivos— se entregan a través de Discord. Al pulsar "Obtener acceso" se te asignará automáticamente el rol correspondiente y se desbloquearán los canales de tu plan.
-
-Únete a la comunidad:
-Para anuncios oficiales, horarios de clases y unirte a los chats (WhatsApp y Telegram), visita: https://nazatradingacademy.com
-
-Si no tienes Discord:
-- Descargar Discord: https://discord.com/download
-- Cómo crear una cuenta (ES): https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr
-
-Enlace para obtener acceso (un solo uso — válido hasta completar registro):
-${claimUrl}
-
-Detalles:
-Plan: ${planName}
-ID de suscripción: ${subscriptionId || ''}
-Email: ${email || ''}
-
-Soporte: ${supportEmail || SUPPORT_EMAIL || 'support@nazatradingacademy.com'}
-
-Nota: El enlace es de un solo uso y funcionará hasta que completes el proceso en Discord.`;
+  return `Hola ${name || 'usuario'}, ¡Bienvenido a NAZA Trading Academy!\n\nTu suscripción ha sido activada correctamente.\n\nEntrega del servicio:\nTodos los privilegios de tu plan —cursos, clases en vivo, análisis y canales exclusivos— se entregan a través de Discord. Al pulsar "Obtener acceso" se te asignará automáticamente el rol correspondiente y se desbloquearán los canales de tu plan.\n\nÚnete a la comunidad:\nPara anuncios oficiales, horarios de clases y unirte a los chats (WhatsApp y Telegram), visita: https://nazatradingacademy.com\n\nSi no tienes Discord:\n- Descargar Discord: https://discord.com/download\n- Cómo crear una cuenta (ES): https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr\n\nEnlace para obtener acceso (un solo uso — válido hasta completar registro):\n${claimUrl}\n\nDetalles:\nPlan: ${planName}\nID de suscripción: ${subscriptionId || ''}\nEmail: ${email || ''}\n\nSoporte: ${supportEmail || SUPPORT_EMAIL || 'support@nazatradingacademy.com'}\n\nNota: El enlace es de un solo uso y funcionará hasta que completes el proceso en Discord.`;
 }
 
 async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId, extra = {}, existingToken = null) {
@@ -437,63 +412,64 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 
 // ============================================
 // ROUTE: /webhook/whop (signature verification REMOVED)
-// Robust parsing: aceptamos Buffer, objeto ya parseado o string
-app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req, res) => {
+// Robust parsing: aceptamos Buffer, objeto ya parseado o string AND accept any content-type
+app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (req, res) => {
   try {
-    const rawBody = req.body; // puede ser Buffer, Object o string
-    let payload;
+    const rawBody = req.body; // puede ser Buffer
+    let payload = null;
+    let rawText = '';
+    let parsedAs = 'unknown';
 
-    // Manejar Buffer (raw), objeto ya parseado o string
+    // Normalize rawText
     if (Buffer.isBuffer(rawBody)) {
-      const txt = rawBody.toString('utf8').trim();
-      if (!txt) {
-        await logAccess(null, 'webhook_empty_body', {});
-        return res.status(400).send('Empty body');
-      }
-      try {
-        payload = JSON.parse(txt);
-      } catch (err) {
-        console.error('Webhook: invalid JSON body (buffer->string)', err?.message || err);
-        await logAccess(null, 'webhook_invalid_json', { sample: txt.slice(0,200) });
-        return res.status(400).send('Invalid JSON');
-      }
-    } else if (typeof rawBody === 'object' && rawBody !== null) {
-      // Express ya parseó el JSON y puso un objeto en req.body
-      payload = rawBody;
+      rawText = rawBody.toString('utf8');
     } else if (typeof rawBody === 'string') {
-      const txt = rawBody.trim();
-      if (!txt) {
-        await logAccess(null, 'webhook_empty_body', {});
-        return res.status(400).send('Empty body');
-      }
-      try {
-        payload = JSON.parse(txt);
-      } catch (err) {
-        console.error('Webhook: invalid JSON body (string)', err?.message || err);
-        await logAccess(null, 'webhook_invalid_json', { sample: txt.slice(0,200) });
-        return res.status(400).send('Invalid JSON');
-      }
+      rawText = rawBody;
+    } else if (typeof rawBody === 'object' && rawBody !== null) {
+      // Express might have already parsed the JSON if middleware was added elsewhere — stringify to keep raw
+      try { rawText = JSON.stringify(rawBody); } catch (e) { rawText = String(rawBody); }
     } else {
-      await logAccess(null, 'webhook_unrecognized_body_type', { type: typeof rawBody });
-      return res.status(400).send('Unsupported body type');
+      rawText = String(rawBody || '');
+    }
+
+    // Try JSON
+    try {
+      payload = JSON.parse(rawText);
+      parsedAs = 'json';
+    } catch (err) {
+      // try form-encoded
+      try {
+        const urlParams = new URLSearchParams(rawText);
+        const obj = {};
+        for (const [k, v] of urlParams.entries()) obj[k] = v;
+        if (Object.keys(obj).length > 0) {
+          payload = obj;
+          parsedAs = 'form';
+        } else {
+          // fallback: try to see if req.body already is an object
+          if (typeof req.body === 'object' && req.body !== null && !Buffer.isBuffer(req.body)) {
+            payload = req.body;
+            parsedAs = 'object';
+          } else {
+            payload = { raw: rawText };
+            parsedAs = 'text';
+          }
+        }
+      } catch (err2) {
+        payload = { raw: rawText };
+        parsedAs = 'text';
+      }
     }
 
     // DEBUG: muestra un resumen corto del payload para debug
     try {
-      console.log('WEBHOOK payload sample:', JSON.stringify({
-        event: payload.event || payload.type || payload.kind || payload?.data?.event,
-        product_id: payload.data?.product_id || payload.product_id || payload.product?.id || payload.data?.plan_id || payload.plan_id || null,
-        order: payload.data?.order_id || payload.id || (payload.data && payload.data.id) || null,
-        email: (payload.data?.buyer?.email || payload.data?.customer?.email || payload.buyer?.email || payload.customer?.email || '').slice(0,200)
-      }));
-    } catch (e) {
-      // ignore logging errors
-    }
+      console.log('WEBHOOK FULL payload (parsedAs=' + parsedAs + '):', rawText.slice(0, 2000));
+    } catch (e) {}
 
     // Support different event key names
     const event = payload.event || payload.type || payload.kind || payload?.data?.event || null;
     const data = payload.data || payload || {};
-    await logAccess(null, 'webhook_received', { event });
+    await logAccess(null, 'webhook_received', { event, parsedAs });
 
     // Normalize fields
     const orderId = data.order_id || data.id || (data.order && data.order.id) || null;
@@ -503,10 +479,16 @@ app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req,
     const amount = data.amount || (data.order && data.order.amount) || null;
     const currency = data.currency || (data.order && data.order.currency) || null;
     const buyer = data.buyer || data.customer || {};
-    const email = (buyer.email || '').toString().trim().toLowerCase();
-    const last4 = (data.payment_method && data.payment_method.last4) || (buyer.last4) || (data.card_last4) || '';
+    const email = (buyer && (buyer.email || buyer.email_address)) ? String((buyer.email || buyer.email_address)).trim().toLowerCase() : '';
+    const last4 = (data.payment_method && data.payment_method.last4) || (buyer && buyer.last4) || (data.card_last4) || '';
 
-    // Idempotency: check if we already processed this order
+    // Persist raw event (always store rawText + parsedAs)
+    await supabase
+      .from('webhook_events')
+      .insert([{ order_id: orderId, subscription_id: subscriptionId, event: event || status || 'unknown', raw: rawText, parsed_as: parsedAs, received_at: new Date().toISOString() }])
+      .catch(err => { console.warn('No se pudo persistir webhook_events (continuamos):', err?.message || err); });
+
+    // Idempotency: if orderId present, check if we've processed
     if (orderId) {
       const { data: existing, error: exErr } = await supabase
         .from('webhook_events')
@@ -514,16 +496,11 @@ app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req,
         .eq('order_id', orderId)
         .limit(1);
       if (exErr) console.warn('exErr checking webhook_events:', exErr);
-      if (existing && existing.length > 0) {
-        // Already received — respond 200
+      if (existing && existing.length > 1) {
         await logAccess(null, 'webhook_duplicate', { orderId });
+        // still return ok
         return res.status(200).send('already processed');
       }
-      // persist basic event to avoid races
-      await supabase
-        .from('webhook_events')
-        .insert([{ order_id: orderId, subscription_id: subscriptionId, event: event || status || 'unknown', raw: payload, received_at: new Date().toISOString() }])
-        .catch(err => { console.warn('No se pudo persistir webhook_events (continuamos):', err?.message || err); });
     }
 
     const eventLower = (event || '').toString().toLowerCase();
@@ -537,10 +514,11 @@ app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req,
       eventLower.includes('payment_succeeded_v2') ||
       eventLower.includes('paid')
     ) {
-      // ✅ EMAIL ES EL ÚNICO REQUISITO FIJO
+      // Do NOT reject if email missing — user requested no restrictions.
       if (!email) {
-        await logAccess(null, 'webhook_missing_email', { orderId, subscriptionId, payload_sample: payload && typeof payload === 'object' ? (payload.product_id || payload.plan_id || payload.data?.product_id) : null });
-        return res.status(400).send('Missing email');
+        await logAccess(null, 'webhook_missing_email', { orderId, subscriptionId, parsedAs });
+        // Persisted already. We won't create claim or send email because email is required for that.
+        return res.status(200).send('ok_no_email');
       }
 
       try {
@@ -671,6 +649,10 @@ app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req,
   }
 });
 
+// Restore express json/urlencoded for the rest of the app (moved AFTER webhook route on purpose)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 // ============================================
 // ROUTE: claim redirect
 app.get('/api/auth/claim', async (req, res) => {
@@ -787,11 +769,11 @@ app.get('/discord/callback', async (req, res) => {
     const roleId = (function getRoleIdForPlan(planId) {
       const planKey = detectPlanKeyFromString(planId);
       const mapping = {
-        'plan_mensual': ROLE_ID_SENALESDISCORD,
-        'plan_trimestral': ROLE_ID_MENTORIADISCORD,
-        'plan_anual': ROLE_ID_ANUALDISCORD
+        'plan_mensual': ROLE_ID_MENSUAL,
+        'plan_trimestral': ROLE_ID_TRIMESTRAL,
+        'plan_anual': ROLE_ID_ANUAL
       };
-      return mapping[planKey] || ROLE_ID_SENALESDISCORD;
+      return mapping[planKey] || ROLE_ID_MENSUAL;
     })(authData.plan_id);
 
     // BEFORE inserting: check conflicts (email/clan/last4) among active memberships
