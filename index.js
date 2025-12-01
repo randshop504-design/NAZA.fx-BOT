@@ -38,6 +38,15 @@ const JWT_SIGNING_SECRET = process.env.JWT_SIGNING_SECRET || '';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
 // ============================================
+// PRODUCT ID -> ROLE mapping (requested)
+// If Whop sends a product ID like 'prod_VD83C9VQ7qYjF' we will map directly to the corresponding role.
+const PRODUCT_ROLE_MAP = {
+  'prod_VD83C9VQ7qYjF': ROLE_ID_MENSUAL,       // plan mensual
+  'prod_8ITa0Ux0IajNA': ROLE_ID_TRIMESTRAL,   // plan trimestral
+  'prod_7Uun6u558QKNs': ROLE_ID_ANUAL         // plan anual
+};
+
+// ============================================
 // SENDGRID
 if (!SENDGRID_API_KEY) {
   console.warn('⚠️ SENDGRID_API_KEY no definido. Los correos no podrán enviarse.');
@@ -767,6 +776,9 @@ app.get('/discord/callback', async (req, res) => {
 
     // Determine role basado en CUALQUIER texto del plan/producto
     const roleId = (function getRoleIdForPlan(planId) {
+      // 1) Direct product ID -> role mapping (highest priority)
+      if (PRODUCT_ROLE_MAP[planId]) return PRODUCT_ROLE_MAP[planId];
+      // 2) fallback to text detection
       const planKey = detectPlanKeyFromString(planId);
       const mapping = {
         'plan_mensual': ROLE_ID_MENSUAL,
