@@ -437,22 +437,57 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 
 // ============================================
 // ROUTE: /webhook/whop (signature verification REMOVED)
+// Robust parsing: aceptamos Buffer, objeto ya parseado o string
 app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    const rawBody = req.body; // Buffer
-    // NOTE: signature verification intentionally removed per request.
-    if (!rawBody || rawBody.length === 0) {
-      await logAccess(null, 'webhook_empty_body', {});
-      return res.status(400).send('Empty body');
+    const rawBody = req.body; // puede ser Buffer, Object o string
+    let payload;
+
+    // Manejar Buffer (raw), objeto ya parseado o string
+    if (Buffer.isBuffer(rawBody)) {
+      const txt = rawBody.toString('utf8').trim();
+      if (!txt) {
+        await logAccess(null, 'webhook_empty_body', {});
+        return res.status(400).send('Empty body');
+      }
+      try {
+        payload = JSON.parse(txt);
+      } catch (err) {
+        console.error('Webhook: invalid JSON body (buffer->string)', err?.message || err);
+        await logAccess(null, 'webhook_invalid_json', { sample: txt.slice(0,200) });
+        return res.status(400).send('Invalid JSON');
+      }
+    } else if (typeof rawBody === 'object' && rawBody !== null) {
+      // Express ya parseó el JSON y puso un objeto en req.body
+      payload = rawBody;
+    } else if (typeof rawBody === 'string') {
+      const txt = rawBody.trim();
+      if (!txt) {
+        await logAccess(null, 'webhook_empty_body', {});
+        return res.status(400).send('Empty body');
+      }
+      try {
+        payload = JSON.parse(txt);
+      } catch (err) {
+        console.error('Webhook: invalid JSON body (string)', err?.message || err);
+        await logAccess(null, 'webhook_invalid_json', { sample: txt.slice(0,200) });
+        return res.status(400).send('Invalid JSON');
+      }
+    } else {
+      await logAccess(null, 'webhook_unrecognized_body_type', { type: typeof rawBody });
+      return res.status(400).send('Unsupported body type');
     }
 
-    let payload;
+    // DEBUG: muestra un resumen corto del payload para debug
     try {
-      payload = JSON.parse(rawBody.toString('utf8'));
-    } catch (err) {
-      console.error('Webhook: invalid JSON body', err?.message || err);
-      await logAccess(null, 'webhook_invalid_json', {});
-      return res.status(400).send('Invalid JSON');
+      console.log('WEBHOOK payload sample:', JSON.stringify({
+        event: payload.event || payload.type || payload.kind || payload?.data?.event,
+        product_id: payload.data?.product_id || payload.product_id || payload.product?.id || payload.data?.plan_id || payload.plan_id || null,
+        order: payload.data?.order_id || payload.id || (payload.data && payload.data.id) || null,
+        email: (payload.data?.buyer?.email || payload.data?.customer?.email || payload.buyer?.email || payload.customer?.email || '').slice(0,200)
+      }));
+    } catch (e) {
+      // ignore logging errors
     }
 
     // Support different event key names
@@ -464,7 +499,7 @@ app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req,
     const orderId = data.order_id || data.id || (data.order && data.order.id) || null;
     const subscriptionId = data.subscription_id || data.subscription?.id || null;
     const status = data.status || data.payment_status || null;
-    const productId = data.product_id || data.product?.id || data.product_name || null;
+    const productId = data.product_id || data.product?.id || data.product_name || data.plan_id || null;
     const amount = data.amount || (data.order && data.order.amount) || null;
     const currency = data.currency || (data.order && data.order.currency) || null;
     const buyer = data.buyer || data.customer || {};
@@ -504,7 +539,7 @@ app.post('/webhook/whop', express.raw({ type: 'application/json' }), async (req,
     ) {
       // ✅ EMAIL ES EL ÚNICO REQUISITO FIJO
       if (!email) {
-        await logAccess(null, 'webhook_missing_email', { orderId, subscriptionId });
+        await logAccess(null, 'webhook_missing_email', { orderId, subscriptionId, payload_sample: payload && typeof payload === 'object' ? (payload.product_id || payload.plan_id || payload.data?.product_id) : null });
         return res.status(400).send('Missing email');
       }
 
