@@ -19,7 +19,7 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL;
 const GUILD_ID = process.env.GUILD_ID;
-// Support both sets of names: prefer PANEL names (ROLE_ID_ANUAL, ROLE_ID_MENSUAL, ROLE_ID_TRIMESTRAL)
+// Role envs (use the ones you provided)
 const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUAL || process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUALDISCORD;
 const ROLE_ID_MENSUAL = process.env.ROLE_ID_MENSUAL || process.env.ROLE_ID_MENSUALDISCORD || process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_SENALES || process.env.ROLE_ID_MENSUAL;
 const ROLE_ID_TRIMESTRAL = process.env.ROLE_ID_TRIMESTRAL || process.env.ROLE_ID_TRIMESTRALDISCORD || process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL;
@@ -32,18 +32,21 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const BOT_URL = process.env.BOT_URL || BASE_URL;
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
-const WHOP_WEBHOOK_SECRET = process.env.WHOP_WEBHOOK_SECRET || '';
-const WHOP_API_KEY = process.env.WHOP_API_KEY || '';
 const JWT_SIGNING_SECRET = process.env.JWT_SIGNING_SECRET || '';
 const NODE_ENV = process.env.NODE_ENV || 'development';
+const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || ''; // optional for PayPal verification
 
 // ============================================
-// PRODUCT ID -> ROLE mapping (requested)
-// If Whop sends a product ID like 'prod_VD83C9VQ7qYjF' we will map directly to the corresponding role.
+// PRODUCT ID -> ROLE mapping (use your known product ids)
 const PRODUCT_ROLE_MAP = {
-  'prod_VD83C9VQ7qYjF': ROLE_ID_MENSUAL,       // plan mensual
-  'prod_8ITa0Ux0IajNA': ROLE_ID_TRIMESTRAL,   // plan trimestral
-  'prod_7Uun6u558QKNs': ROLE_ID_ANUAL         // plan anual
+  // example product ids you showed earlier; adjust if different
+  'NRH364VHDNAX6': ROLE_ID_MENSUAL,       // plan mensual
+  'WB6B3EEG4T8RQ': ROLE_ID_TRIMESTRAL,    // plan trimestral
+  'CFQ2Z3QEDSJYS': ROLE_ID_ANUAL,         // plan anual
+  // keep old prod_* mapping if you also use them (safe to include)
+  'prod_VD83C9VQ7qYjF': ROLE_ID_MENSUAL,
+  'prod_8ITa0Ux0IajNA': ROLE_ID_TRIMESTRAL,
+  'prod_7Uun6u558QKNs': ROLE_ID_ANUAL
 };
 
 // ============================================
@@ -99,13 +102,12 @@ function emailSafe(e){ return e || ''; }
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (ALLOWED_ORIGINS.length === 0) {
-    // if not configured, allow all for dev — but recommend setting ALLOWED_ORIGINS
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
   } else if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-frontend-token, x-signature, x-whop-signature');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-frontend-token, x-signature');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -140,7 +142,6 @@ function detectPlanKeyFromString(planIdRaw) {
   const txt = (planIdRaw || '').toString().toLowerCase();
   if (!txt) return 'other';
 
-  // mensual
   if (
     txt.includes('plan_mensual') ||
     txt.includes('mensual') ||
@@ -150,7 +151,6 @@ function detectPlanKeyFromString(planIdRaw) {
     txt.includes('30 días')
   ) return 'plan_mensual';
 
-  // trimestral
   if (
     txt.includes('plan_trimestral') ||
     txt.includes('trimestral') ||
@@ -160,7 +160,6 @@ function detectPlanKeyFromString(planIdRaw) {
     txt.includes('90 días')
   ) return 'plan_trimestral';
 
-  // anual
   if (
     txt.includes('plan_anual') ||
     txt.includes('anual') ||
@@ -175,8 +174,8 @@ function detectPlanKeyFromString(planIdRaw) {
 }
 
 // ============================================
-// CLAIMS + VALIDATIONS (createClaimToken adapted, con lógica de re-compra tras cancelación)
-async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, extra = {} }) {
+// CLAIMS + VALIDATIONS (store token in plain as you requested)
+async function createClaimToken({ email, name, plan_id, subscriptionId, customerId, last4, cardExpiry, paymentFingerprint = '', extra = {} }) {
   email = (email || '').trim().toLowerCase();
   if (!email) throw new Error('Email requerido para crear claim');
 
@@ -189,9 +188,6 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     .limit(1);
   if (memErr) {
     console.error('Error consultando memberships:', memErr);
-    if (memErr.code === 'PGRST205' || (memErr.message && memErr.message.includes('Could not find the table'))) {
-      console.error('ERROR: Parece que la tabla "memberships" no existe o la service role key está mal.');
-    }
     throw new Error('Error interno');
   }
   if (existingMembership && existingMembership.length > 0) {
@@ -213,34 +209,32 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
     throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
   }
 
-  // 3) verificar uso de tarjeta (no permitir >2 correos distintos entre memberships activas y claims pendientes)
-  if (last4 && last4.toString().trim() !== '') {
+  // 3) verificar uso de tarjeta / fingerprint
+  if (paymentFingerprint && paymentFingerprint.toString().trim() !== '') {
     const [{ data: mRows, error: mErr }, { data: cRows, error: cErr }] = await Promise.all([
       supabase
         .from('memberships')
         .select('email, status')
-        .eq('last4', last4)
-        .eq('card_expiry', cardExpiry || '')
+        .eq('payment_fingerprint', paymentFingerprint)
         .eq('status', 'active'),
       supabase
         .from('claims')
         .select('email, used')
-        .eq('last4', last4)
-        .eq('card_expiry', cardExpiry || '')
+        .eq('payment_fingerprint', paymentFingerprint)
         .eq('used', false)
     ]);
-    if (mErr) console.warn('mErr checking card:', mErr);
-    if (cErr) console.warn('cErr checking card:', cErr);
+    if (mErr) console.warn('mErr checking fingerprint:', mErr);
+    if (cErr) console.warn('cErr checking fingerprint:', cErr);
     const distinctEmails = new Set();
     (mRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
     (cRows || []).forEach(r => { if (r.email) distinctEmails.add(String(r.email).toLowerCase()); });
     distinctEmails.delete('');
     if (distinctEmails.size >= 2 && !distinctEmails.has(email)) {
-      throw new Error('Esta tarjeta ya está asociada a dos cuentas distintas. Contacta soporte.');
+      throw new Error('Esta tarjeta/método de pago ya está asociada a dos cuentas distintas. Contacta soporte.');
     }
   }
 
-  // Recheck quick to reduce race (mismas reglas: solo active + claims pendientes)
+  // Recheck quick to reduce race
   const [{ data: recheckMembership }, { data: recheckClaim }] = await Promise.all([
     supabase
       .from('memberships')
@@ -258,21 +252,24 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   if (recheckMembership && recheckMembership.length > 0) throw new Error('Este correo ya está registrado');
   if (recheckClaim && recheckClaim.length > 0) throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
 
-  // generate token
-  const token = crypto.randomBytes(24).toString('hex'); // 48 chars
+  // generate plain token and store it directly (PLANO)
+  const token = crypto.randomBytes(24).toString('hex'); // 48 chars plain token to email
+
   const row = {
-    token,
+    token, // token PLANO guardado
     email,
-    last4: last4 || '',
-    card_expiry: cardExpiry || '',
     name: name || '',
     plan_id: plan_id || '',
     subscription_id: subscriptionId || '',
     customer_id: customerId || '',
-    extra: JSON.stringify(extra || {}),
+    last4: last4 || '',
+    card_expiry: cardExpiry || '',
+    payment_fingerprint: paymentFingerprint || '',
     used: false,
+    extra: JSON.stringify(extra || {}),
     created_at: new Date().toISOString()
   };
+
   const { error: insertErr } = await supabase.from('claims').insert([row]);
   if (insertErr) {
     console.error('Error insertando claim:', insertErr);
@@ -284,7 +281,8 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
 
 // ============================================
 // EMAIL: build templates & send
-// --- REPLACED: long NAZA template (HTML + text) integrated here ---
+// (Kept your original HTML + text template unchanged — pasted as-is)
+
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
   const logoPath = process.env.LOGO_URL || 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
 
@@ -401,6 +399,7 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
       customerId,
       last4: extra.last4,
       cardExpiry: extra.cardExpiry,
+      paymentFingerprint: extra.payment_fingerprint,
       extra
     });
   }
@@ -420,33 +419,27 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 }
 
 // ============================================
-// ROUTE: /webhook/whop (signature verification REMOVED)
-// Robust parsing: aceptamos Buffer, objeto ya parseado o string AND accept any content-type
-app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (req, res) => {
+// ROUTE: /webhook/paypal (raw body) — generic parser + idempotency + create plain claim + send email
+app.post('/webhook/paypal', express.raw({ type: '*/*', limit: '10mb' }), async (req, res) => {
   try {
-    const rawBody = req.body; // puede ser Buffer
+    // TODO: implement PayPal signature verification here using PAYPAL_WEBHOOK_ID and headers.
+    // For now we parse payload and act — add verification in production.
+
+    const rawBody = req.body; // Buffer or string
     let payload = null;
     let rawText = '';
     let parsedAs = 'unknown';
 
-    // Normalize rawText
-    if (Buffer.isBuffer(rawBody)) {
-      rawText = rawBody.toString('utf8');
-    } else if (typeof rawBody === 'string') {
-      rawText = rawBody;
-    } else if (typeof rawBody === 'object' && rawBody !== null) {
-      // Express might have already parsed the JSON if middleware was added elsewhere — stringify to keep raw
+    if (Buffer.isBuffer(rawBody)) rawText = rawBody.toString('utf8');
+    else if (typeof rawBody === 'string') rawText = rawBody;
+    else if (typeof rawBody === 'object' && rawBody !== null) {
       try { rawText = JSON.stringify(rawBody); } catch (e) { rawText = String(rawBody); }
-    } else {
-      rawText = String(rawBody || '');
-    }
+    } else rawText = String(rawBody || '');
 
-    // Try JSON
     try {
       payload = JSON.parse(rawText);
       parsedAs = 'json';
     } catch (err) {
-      // try form-encoded
       try {
         const urlParams = new URLSearchParams(rawText);
         const obj = {};
@@ -455,7 +448,6 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
           payload = obj;
           parsedAs = 'form';
         } else {
-          // fallback: try to see if req.body already is an object
           if (typeof req.body === 'object' && req.body !== null && !Buffer.isBuffer(req.body)) {
             payload = req.body;
             parsedAs = 'object';
@@ -470,72 +462,69 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
       }
     }
 
-    // DEBUG: muestra un resumen corto del payload para debug
-    try {
-      console.log('WEBHOOK FULL payload (parsedAs=' + parsedAs + '):', rawText.slice(0, 2000));
-    } catch (e) {}
+    // Debug short
+    try { console.log('PAYPAL WEBHOOK payload parsedAs=' + parsedAs + ':', rawText.slice(0, 1200)); } catch (e) {}
 
-    // Support different event key names
-    const event = payload.event || payload.type || payload.kind || payload?.data?.event || null;
-    const data = payload.data || payload || {};
-    await logAccess(null, 'webhook_received', { event, parsedAs });
+    const event = payload.event_type || payload.event || payload.type || payload.kind || null;
+    const data = payload.resource || payload.data || payload || {};
+    await logAccess(null, 'webhook_received', { provider: 'paypal', event, parsedAs });
 
-    // Normalize fields
-    const orderId = data.order_id || data.id || (data.order && data.order.id) || null;
-    const subscriptionId = data.subscription_id || data.subscription?.id || null;
-    const status = data.status || data.payment_status || null;
-    const productId = data.product_id || data.product?.id || data.product_name || data.plan_id || null;
-    const amount = data.amount || (data.order && data.order.amount) || null;
-    const currency = data.currency || (data.order && data.order.currency) || null;
-    const buyer = data.buyer || data.customer || {};
-    const email = (buyer && (buyer.email || buyer.email_address)) ? String((buyer.email || buyer.email_address)).trim().toLowerCase() : '';
-    const last4 = (data.payment_method && data.payment_method.last4) || (buyer && buyer.last4) || (data.card_last4) || '';
+    // Normalize fields (common PayPal names)
+    const orderId = data.id || data.order_id || data.invoice_id || null;
+    const subscriptionId = data.billing_agreement_id || data.subscription_id || null;
+    const status = data.status || null;
+    const productId = (data.plan_id || data.product_id || data.sku || data.item_id) || null;
+    const amount = data.amount || (data.purchase_units && data.purchase_units[0] && data.purchase_units[0].amount && data.purchase_units[0].amount.value) || null;
+    const currency = (data.amount && data.amount.currency) || (data.purchase_units && data.purchase_units[0] && data.purchase_units[0].amount && data.purchase_units[0].amount.currency_code) || null;
+    const payer = data.payer || data.payer_info || data.customer || {};
+    const email = (payer && (payer.email_address || payer.email)) ? String(payer.email_address || payer.email).trim().toLowerCase() : '';
+    const payerId = payer && (payer.payer_id || payer.payerID || payer.id) ? (payer.payer_id || payer.payerID || payer.id) : '';
+    // last4 detection if present
+    const last4 = (data.last4 || (data.payment_source && data.payment_source.card && data.payment_source.card.last_digits) || '') || '';
 
-    // Persist raw event (always store rawText + parsedAs)
+    // Persist raw event (best-effort)
     await supabase
       .from('webhook_events')
-      .insert([{ order_id: orderId, subscription_id: subscriptionId, event: event || status || 'unknown', raw: rawText, parsed_as: parsedAs, received_at: new Date().toISOString() }])
+      .insert([{ provider: 'paypal', order_id: orderId, subscription_id: subscriptionId, event: event || status || 'unknown', raw: rawText, parsed_as: parsedAs, received_at: new Date().toISOString() }])
       .catch(err => { console.warn('No se pudo persistir webhook_events (continuamos):', err?.message || err); });
 
-    // Idempotency: if orderId present, check if we've processed
+    // Idempotency check by orderId
     if (orderId) {
       const { data: existing, error: exErr } = await supabase
         .from('webhook_events')
-        .select('id')
+        .select('id, processed')
         .eq('order_id', orderId)
         .limit(1);
       if (exErr) console.warn('exErr checking webhook_events:', exErr);
-      if (existing && existing.length > 1) {
-        await logAccess(null, 'webhook_duplicate', { orderId });
-        // still return ok
+      if (existing && existing.length > 0 && existing[0].processed) {
+        await logAccess(null, 'webhook_duplicate_processed', { orderId });
         return res.status(200).send('already processed');
       }
     }
 
     const eventLower = (event || '').toString().toLowerCase();
 
-    // Handle main events: pago completado / membership activada
+    // Payment completed events detection (common PayPal event types include PAYMENT.CAPTURE.COMPLETED, BILLING.SUBSCRIPTION.CREATED, PAYMENT.SALE.COMPLETED)
     if (
-      eventLower.includes('payment_succeeded') ||
-      eventLower.includes('order.paid') ||
-      eventLower.includes('order_paid') ||
-      eventLower.includes('membership_activated') ||
-      eventLower.includes('payment_succeeded_v2') ||
-      eventLower.includes('paid')
+      eventLower.includes('completed') ||
+      eventLower.includes('paid') ||
+      eventLower.includes('payment') ||
+      eventLower.includes('sale.completed') ||
+      eventLower.includes('payment.capture.completed') ||
+      eventLower.includes('capture')
     ) {
-      // Do NOT reject if email missing — user requested no restrictions.
       if (!email) {
         await logAccess(null, 'webhook_missing_email', { orderId, subscriptionId, parsedAs });
-        // Persisted already. We won't create claim or send email because email is required for that.
         return res.status(200).send('ok_no_email');
       }
 
       try {
-        // Idempotencia por email: si ya hay membership activa, no hacemos nada
+        // If an active membership exists for this email -> noop
         const { data: members, error: memErr } = await supabase
           .from('memberships')
           .select('id,status')
           .eq('email', email)
+          .eq('status', 'active')
           .limit(1);
         if (memErr) console.warn('memErr checking membership in webhook:', memErr);
         if (members && members.length > 0 && members[0].status === 'active') {
@@ -543,7 +532,7 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
           return res.status(200).send('member already active');
         }
 
-        // Intentar reusar claim por subscription/order o crear uno nuevo
+        // Try reuse claim by subscription/order
         const { data: existingClaims } = await supabase
           .from('claims')
           .select('*')
@@ -560,18 +549,19 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
             return res.status(200).send('claim already used');
           }
         } else {
-          // crear claim (plan_id = productId opcional)
+          // create claim (store token in plain)
           token = await createClaimToken({
             email,
-            name: buyer.full_name || buyer.name || '',
+            name: `${(payer.name && (payer.name.given_name || payer.name.full_name)) || ''}`,
             plan_id: productId || '',
             subscriptionId,
-            customerId: buyer.id || '',
+            customerId: payerId || '',
             last4,
             cardExpiry: data.card_expiry || '',
+            paymentFingerprint: payerId || '',
             extra: { order: orderId }
           });
-          // anotar orderId en extra (best-effort)
+          // annotate claim with orderId in extra (best-effort)
           await supabase
             .from('claims')
             .update({ extra: JSON.stringify({ order: orderId }) })
@@ -579,14 +569,20 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
             .catch(()=>{});
         }
 
-        // enviar email con link de activación (Discord OAuth + claim de un solo uso)
+        // mark webhook event processed (best-effort)
+        await supabase.from('webhook_events')
+          .update({ processed: true })
+          .or(orderId ? `order_id.eq.${orderId}` : `subscription_id.eq.${subscriptionId}`)
+          .catch(()=>{});
+
+        // send welcome email with claim link
         sendWelcomeEmail(
           email,
-          buyer.full_name || '',
+          (payer && (payer.name && payer.name.given_name)) || '',
           productId || '',
           subscriptionId,
-          buyer.id || '',
-          { last4, cardExpiry: data.card_expiry || '' },
+          payerId || '',
+          { last4, cardExpiry: data.card_expiry || '', payment_fingerprint: payerId || '' },
           token
         )
           .then(()=> logAccess(null, 'webhook_email_dispatched', { email, orderId }))
@@ -594,19 +590,19 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
 
         return res.status(200).send('ok');
       } catch (err) {
-        console.error('Error processing payment_succeeded webhook:', err?.message || err);
+        console.error('Error processing paypal webhook:', err?.message || err);
         await logAccess(null, 'webhook_processing_error', { err: err?.message || err });
         return res.status(500).send('error processing');
       }
     }
 
-    // cancellation / deactivation → quitar rol (no kick)
+    // Cancellation / refund events: revoke role (no kick)
     if (
+      eventLower.includes('cancel') ||
+      eventLower.includes('refund') ||
       eventLower.includes('subscription.cancelled') ||
-      eventLower.includes('subscription_cancelled') ||
-      eventLower.includes('membership_deactivated') ||
-      eventLower.includes('order_refunded') ||
-      eventLower.includes('cancel')
+      eventLower.includes('subscription_revoked') ||
+      eventLower.includes('subscription.canceled')
     ) {
       try {
         const lookup = subscriptionId ? { subscription_id: subscriptionId } : (orderId ? { order_id: orderId } : null);
@@ -621,7 +617,6 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
           .limit(1);
         if (rows && rows.length > 0) {
           const row = rows[0];
-          // revoke role if exists (sin sacar al usuario del servidor)
           if (row.discord_id && row.role_id) {
             try {
               const guild = await discordClient.guilds.fetch(GUILD_ID);
@@ -633,7 +628,6 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
               await logAccess(row.id, 'role_revocation_failed', { err: err?.message || err });
             }
           }
-          // update membership status
           await supabase
             .from('memberships')
             .update({ status: 'cancelled', revoked_at: new Date().toISOString() })
@@ -653,7 +647,7 @@ app.post('/webhook/whop', express.raw({ type: '*/*', limit: '10mb' }), async (re
     await logAccess(null, 'webhook_unhandled', { event });
     return res.status(200).send('ignored');
   } catch (err) {
-    console.error('❌ Error general en /webhook/whop:', err?.message || err);
+    console.error('❌ Error general en /webhook/paypal:', err?.message || err);
     return res.status(500).send('internal error');
   }
 });
@@ -701,37 +695,22 @@ app.get('/api/auth/claim', async (req, res) => {
 });
 
 // ============================================
-// ROUTE: DISCORD CALLBACK (improved checks + idempotency)
+// ROUTE: DISCORD CALLBACK
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code || !state) return res.status(400).send('Faltan parámetros');
 
-    // Retrieve auth data from pendingAuths or claims
-    let authData = pendingAuths.get(state);
-    let claimData = null;
-    if (!authData) {
-      const { data: claimsRows, error: claimErr } = await supabase
-        .from('claims')
-        .select('*')
-        .eq('token', state)
-        .limit(1);
-      if (claimErr) console.error('Error leyendo claim de Supabase:', claimErr);
-      else if (claimsRows && claimsRows.length > 0) claimData = claimsRows[0];
-      if (claimData) {
-        if (claimData.used) return res.status(400).send('Este enlace ya fue usado.');
-        authData = {
-          email: claimData.email,
-          name: claimData.name,
-          plan_id: claimData.plan_id,
-          subscription_id: claimData.subscription_id,
-          customer_id: claimData.customer_id,
-          last4: claimData.last4,
-          card_expiry: claimData.card_expiry
-        };
-      }
-    }
-    if (!authData) return res.status(400).send('Sesión expirada o inválida');
+    // Retrieve claim row by token (plain)
+    const { data: claimsRows, error: claimErr } = await supabase
+      .from('claims')
+      .select('*')
+      .eq('token', state)
+      .limit(1);
+    if (claimErr) console.error('Error leyendo claim de Supabase:', claimErr);
+    const claimData = (claimsRows && claimsRows[0]) ? claimsRows[0] : null;
+    if (!claimData) return res.status(400).send('Sesión expirada o inválida');
+    if (claimData.used) return res.status(400).send('Este enlace ya fue usado.');
 
     // Exchange code for token
     const params = new URLSearchParams({
@@ -760,7 +739,7 @@ app.get('/discord/callback', async (req, res) => {
     const discordId = userData.id;
     const discordUsername = userData.username;
 
-    // Add to guild (invite via OAuth2). Best-effort (may fail if already in guild)
+    // Add to guild (invite via OAuth2). Best-effort
     try {
       await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`, {
         method: 'PUT',
@@ -774,11 +753,21 @@ app.get('/discord/callback', async (req, res) => {
       console.warn('Invite to guild failed:', err?.message || err);
     }
 
-    // Determine role basado en CUALQUIER texto del plan/producto
+    // Prepare authData from claim
+    const authData = {
+      email: claimData.email,
+      name: claimData.name,
+      plan_id: claimData.plan_id,
+      subscription_id: claimData.subscription_id,
+      customer_id: claimData.customer_id,
+      last4: claimData.last4,
+      card_expiry: claimData.card_expiry,
+      payment_fingerprint: claimData.payment_fingerprint
+    };
+
+    // Determine role
     const roleId = (function getRoleIdForPlan(planId) {
-      // 1) Direct product ID -> role mapping (highest priority)
       if (PRODUCT_ROLE_MAP[planId]) return PRODUCT_ROLE_MAP[planId];
-      // 2) fallback to text detection
       const planKey = detectPlanKeyFromString(planId);
       const mapping = {
         'plan_mensual': ROLE_ID_MENSUAL,
@@ -788,10 +777,12 @@ app.get('/discord/callback', async (req, res) => {
       return mapping[planKey] || ROLE_ID_MENSUAL;
     })(authData.plan_id);
 
-    // BEFORE inserting: check conflicts (email/clan/last4) among active memberships
+    // Antifraude checks BEFORE inserting membership
     const email = (authData.email || '').toLowerCase().trim();
     const last4 = authData.last4 || '';
-    // check email conflict
+    const paymentFingerprint = authData.payment_fingerprint || '';
+
+    // check email conflict (active)
     const { data: existingByEmail } = await supabase
       .from('memberships')
       .select('id,status')
@@ -803,25 +794,33 @@ app.get('/discord/callback', async (req, res) => {
       await supabase.from('claims').update({ manual_review: true }).eq('token', state).catch(()=>{});
       return res.status(400).send('Conflicto: este correo ya tiene una membresía activa. Contacta soporte.');
     }
-    // check last4 conflict
-    if (last4 && last4.trim() !== '') {
-      const { data: last4Rows } = await supabase
+
+    // check payment fingerprint conflict
+    if (paymentFingerprint && paymentFingerprint.trim() !== '') {
+      const { data: fpRows } = await supabase
         .from('memberships')
         .select('email,status')
-        .eq('last4', last4)
+        .eq('payment_fingerprint', paymentFingerprint)
         .eq('status','active')
         .limit(2);
-      if (last4Rows && last4Rows.length > 0) {
-        const setEmails = new Set((last4Rows || []).map(r => (r.email || '').toLowerCase()));
+      if (fpRows && fpRows.length > 0) {
+        const setEmails = new Set((fpRows || []).map(r => (r.email || '').toLowerCase()));
         if (!setEmails.has(email) && setEmails.size >= 1) {
-          await logAccess(null, 'conflict_detected', { reason: 'last4_conflict', last4, email });
           await supabase.from('claims').update({ manual_review: true }).eq('token', state).catch(()=>{});
-          return res.status(400).send('Conflicto: tarjeta asociada a otra cuenta. Contacta soporte.');
+          await logAccess(null, 'conflict_detected', { reason: 'fingerprint_conflict', paymentFingerprint, email });
+          return res.status(400).send('Conflicto: método de pago asociado a otra cuenta. Contacta soporte.');
         }
       }
     }
 
-    // No conflicts detected -> proceed to insert membership
+    // compute start_at and expires_at (30/90/365)
+    const startAt = new Date();
+    const planKey = detectPlanKeyFromString(authData.plan_id);
+    const daysMap = { 'plan_mensual': 30, 'plan_trimestral': 90, 'plan_anual': 365 };
+    const days = daysMap[planKey] || 30;
+    const expiresAt = new Date(startAt.getTime() + (days * 24 * 60 * 60 * 1000));
+
+    // Insert membership
     const membershipRow = {
       email,
       name: authData.name,
@@ -832,8 +831,13 @@ app.get('/discord/callback', async (req, res) => {
       discord_username: discordUsername,
       status: 'active',
       role_id: roleId,
-      last4: authData.last4 || '',
+      last4: last4 || '',
       card_expiry: authData.card_expiry || '',
+      payment_fingerprint: paymentFingerprint || '',
+      start_at: startAt.toISOString(),
+      expires_at: expiresAt.toISOString(),
+      role_assigned: false,
+      pending_role_assignment: true,
       created_at: new Date().toISOString()
     };
 
@@ -850,17 +854,15 @@ app.get('/discord/callback', async (req, res) => {
       return res.status(500).send('Error interno');
     }
 
-    // mark claim used (if claim existed)
-    if (claimData) {
-      await supabase
-        .from('claims')
-        .update({ used: true, used_at: new Date().toISOString() })
-        .eq('token', state)
-        .catch(err => {
-          console.warn('No se pudo marcar claim como usado:', err?.message || err);
-        });
-      await logAccess(null, 'claim_marked_used', { token: state });
-    }
+    // mark claim used (atomic-ish)
+    await supabase
+      .from('claims')
+      .update({ used: true, used_at: new Date().toISOString() })
+      .eq('token', state)
+      .catch(err => {
+        console.warn('No se pudo marcar claim como usado:', err?.message || err);
+      });
+    await logAccess(null, 'claim_marked_used', { token: state });
 
     // Assign role with retry/backoff
     let roleAssigned = false;
@@ -878,7 +880,13 @@ app.get('/discord/callback', async (req, res) => {
         await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
       }
     }
-    if (!roleAssigned) {
+    if (roleAssigned) {
+      await supabase
+        .from('memberships')
+        .update({ role_assigned: true, pending_role_assignment: false })
+        .eq('discord_id', discordId)
+        .catch(()=>{});
+    } else {
       await logAccess(null, 'role_assign_permanent_fail', { discordId, roleId });
     }
 
@@ -900,6 +908,78 @@ app.get('/discord/callback', async (req, res) => {
     return res.status(500).send('Error procesando la autorización');
   }
 });
+
+// ============================================
+// Background jobs: expirations and pending role retries
+const JOB_INTERVAL_MS = (process.env.JOB_INTERVAL_MS && Number(process.env.JOB_INTERVAL_MS)) || (5 * 60 * 1000);
+
+async function processExpirations() {
+  try {
+    const { data: rows } = await supabase
+      .from('memberships')
+      .select('*')
+      .lt('expires_at', new Date().toISOString())
+      .eq('status', 'active')
+      .limit(100);
+    if (!rows || rows.length === 0) return;
+    for (const r of rows) {
+      try {
+        if (r.discord_id && r.role_id) {
+          try {
+            const guild = await discordClient.guilds.fetch(GUILD_ID);
+            const member = await guild.members.fetch(r.discord_id);
+            await member.roles.remove(r.role_id).catch(e => { throw e; });
+            await logAccess(r.id, 'role_removed_on_expiry', { discord_id: r.discord_id, role_id: r.role_id });
+          } catch (err) {
+            console.warn('Could not remove role on expiry:', err?.message || err);
+            await logAccess(r.id, 'role_remove_expiry_failed', { err: err?.message || err });
+          }
+        }
+        await supabase.from('memberships').update({ status: 'expired', expired_at: new Date().toISOString(), role_assigned: false }).eq('id', r.id);
+      } catch (err) {
+        console.warn('Error processing expiry for membership', r.id, err?.message || err);
+      }
+    }
+  } catch (err) {
+    console.error('Error in processExpirations job:', err?.message || err);
+  }
+}
+
+async function retryPendingRoleAssignments() {
+  try {
+    const { data: rows } = await supabase
+      .from('memberships')
+      .select('*')
+      .eq('pending_role_assignment', true)
+      .eq('status', 'active')
+      .limit(100);
+    if (!rows || rows.length === 0) return;
+    for (const r of rows) {
+      try {
+        if (!r.discord_id || !r.role_id) continue;
+        try {
+          const guild = await discordClient.guilds.fetch(GUILD_ID);
+          const member = await guild.members.fetch(r.discord_id);
+          await member.roles.add(r.role_id);
+          await supabase.from('memberships').update({ role_assigned: true, pending_role_assignment: false }).eq('id', r.id);
+          await logAccess(r.id, 'role_reassigned_by_job', { discord_id: r.discord_id, role_id: r.role_id });
+        } catch (err) {
+          console.warn('Retry assign failed for', r.id, err?.message || err);
+          await logAccess(r.id, 'role_reassign_failed', { err: err?.message || err });
+        }
+      } catch (err) {
+        console.warn('Error in retry loop:', err?.message || err);
+      }
+    }
+  } catch (err) {
+    console.error('Error in retryPendingRoleAssignments job:', err?.message || err);
+  }
+}
+
+setInterval(() => {
+  processExpirations();
+  retryPendingRoleAssignments();
+}, JOB_INTERVAL_MS);
 
 // ============================================
 // HEALTH CHECK
