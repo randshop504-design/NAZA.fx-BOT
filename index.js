@@ -35,6 +35,9 @@ const FRONTEND_URL = process.env.FRONTEND_URL || '';
 const JWT_SIGNING_SECRET = process.env.JWT_SIGNING_SECRET || '';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || ''; // optional for PayPal verification
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
+const PAYPAL_SECRET = process.env.PAYPAL_SECRET || '';
+const PAYPAL_ENV = process.env.PAYPAL_ENV || 'sandbox'; // 'live' or 'sandbox'
 
 // ============================================
 // PRODUCT ID -> ROLE mapping (use your known product ids)
@@ -419,23 +422,98 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 }
 
 // ============================================
+// PayPal signature verification helper
+async function verifyPayPalSignature(rawBodyText, headers) {
+  if (!PAYPAL_WEBHOOK_ID || !PAYPAL_CLIENT_ID || !PAYPAL_SECRET) {
+    // not configured -> skip verification
+    return { ok: true, skipped: true, reason: 'no_config' };
+  }
+
+  try {
+    const paypalApiBase = (PAYPAL_ENV === 'live') ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+    // get access token
+    const basicAuth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString('base64');
+    const tokenRes = await fetch(`${paypalApiBase}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${basicAuth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'grant_type=client_credentials'
+    });
+    const tokenJson = await tokenRes.json();
+    const paypalToken = tokenJson && tokenJson.access_token;
+    if (!paypalToken) {
+      return { ok: false, reason: 'no_token', tokenJson };
+    }
+
+    // prepare verification payload
+    const verificationBody = {
+      auth_algo: headers['paypal-auth-algo'] || headers['paypal_auth_algo'],
+      cert_url: headers['paypal-cert-url'] || headers['paypal_cert_url'],
+      transmission_id: headers['paypal-transmission-id'] || headers['paypal_transmission_id'],
+      transmission_sig: headers['paypal-transmission-sig'] || headers['paypal_transmission_sig'],
+      transmission_time: headers['paypal-transmission-time'] || headers['paypal_transmission_time'],
+      webhook_id: PAYPAL_WEBHOOK_ID,
+      webhook_event: null
+    };
+
+    // try to parse raw body as JSON for webhook_event
+    try {
+      verificationBody.webhook_event = JSON.parse(rawBodyText);
+    } catch (e) {
+      // fallback: provide raw text as webhook_event.raw (PayPal expects object but we'll attempt)
+      verificationBody.webhook_event = { raw: rawBodyText };
+    }
+
+    const verifyRes = await fetch(`${paypalApiBase}/v1/notifications/verify-webhook-signature`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${paypalToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(verificationBody)
+    });
+
+    const verifyJson = await verifyRes.json();
+    if (verifyJson && (verifyJson.verification_status === 'SUCCESS' || verifyJson.verification_status === 'success')) {
+      return { ok: true, verification: verifyJson };
+    } else {
+      return { ok: false, verification: verifyJson };
+    }
+  } catch (err) {
+    return { ok: false, error: err?.message || err };
+  }
+}
+
+// ============================================
 // ROUTE: /webhook/paypal (raw body) — generic parser + idempotency + create plain claim + send email
 app.post('/webhook/paypal', express.raw({ type: '*/*', limit: '10mb' }), async (req, res) => {
   try {
-    // TODO: implement PayPal signature verification here using PAYPAL_WEBHOOK_ID and headers.
-    // For now we parse payload and act — add verification in production.
-
+    // Read raw body
     const rawBody = req.body; // Buffer or string
-    let payload = null;
     let rawText = '';
-    let parsedAs = 'unknown';
-
     if (Buffer.isBuffer(rawBody)) rawText = rawBody.toString('utf8');
     else if (typeof rawBody === 'string') rawText = rawBody;
     else if (typeof rawBody === 'object' && rawBody !== null) {
       try { rawText = JSON.stringify(rawBody); } catch (e) { rawText = String(rawBody); }
     } else rawText = String(rawBody || '');
 
+    // Optional: verify signature if configured
+    const headerLower = {};
+    for (const k of Object.keys(req.headers || {})) headerLower[k.toLowerCase()] = req.headers[k];
+    if (PAYPAL_WEBHOOK_ID) {
+      const verify = await verifyPayPalSignature(rawText, {
+        'paypal-auth-algo': req.headers['paypal-auth-algo'] || req.headers['paypal_auth_algo'],
+        'paypal-cert-url': req.headers['paypal-cert-url'] || req.headers['paypal_cert_url'],
+        'paypal-transmission-id': req.headers['paypal-transmission-id'] || req.headers['paypal_transmission_id'] || req.headers['paypal-transmission-id'.toLowerCase()],
+        'paypal-transmission-sig': req.headers['paypal-transmission-sig'] || req.headers['paypal_transmission_sig'],
+        'paypal-transmission-time': req.headers['paypal-transmission-time'] || req.headers['paypal_transmission_time']
+      });
+      if (!verify.ok) {
+        await logAccess(null, 'paypal_signature_invalid', { reason: verify.reason || verify.verification || verify.error });
+        console.warn('PayPal webhook signature verification failed:', verify);
+        return res.status(400).send('invalid signature');
+      }
+    }
+
+    // parse payload
+    let payload = null;
+    let parsedAs = 'unknown';
     try {
       payload = JSON.parse(rawText);
       parsedAs = 'json';
@@ -477,7 +555,7 @@ app.post('/webhook/paypal', express.raw({ type: '*/*', limit: '10mb' }), async (
     const amount = data.amount || (data.purchase_units && data.purchase_units[0] && data.purchase_units[0].amount && data.purchase_units[0].amount.value) || null;
     const currency = (data.amount && data.amount.currency) || (data.purchase_units && data.purchase_units[0] && data.purchase_units[0].amount && data.purchase_units[0].amount.currency_code) || null;
     const payer = data.payer || data.payer_info || data.customer || {};
-    const email = (payer && (payer.email_address || payer.email)) ? String(payer.email_address || payer.email).trim().toLowerCase() : '';
+    let email = (payer && (payer.email_address || payer.email)) ? String(payer.email_address || payer.email).trim().toLowerCase() : '';
     const payerId = payer && (payer.payer_id || payer.payerID || payer.id) ? (payer.payer_id || payer.payerID || payer.id) : '';
     // last4 detection if present
     const last4 = (data.last4 || (data.payment_source && data.payment_source.card && data.payment_source.card.last_digits) || '') || '';
@@ -513,9 +591,61 @@ app.post('/webhook/paypal', express.raw({ type: '*/*', limit: '10mb' }), async (
       eventLower.includes('payment.capture.completed') ||
       eventLower.includes('capture')
     ) {
+      // If email missing, try to recover from PayPal order API (force mail)
       if (!email) {
-        await logAccess(null, 'webhook_missing_email', { orderId, subscriptionId, parsedAs });
-        return res.status(200).send('ok_no_email');
+        await logAccess(null, 'paypal_webhook_no_email_initial', { orderId });
+
+        try {
+          // 1. Obtener access token de PayPal
+          const basicAuth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString('base64');
+          const paypalApiBase = (PAYPAL_ENV === 'live') ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+          const tokenRes = await fetch(`${paypalApiBase}/v1/oauth2/token`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Basic ${basicAuth}`,
+              'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: 'grant_type=client_credentials'
+          });
+
+          const tokenJson = await tokenRes.json();
+          const paypalToken = tokenJson && tokenJson.access_token;
+          if (!paypalToken) {
+            await logAccess(null, 'paypal_webhook_no_email_failed', { orderId, reason: 'no_token', tokenJson });
+            return res.status(200).send('ok_no_email');
+          }
+
+          // 2. Consultar la orden directamente en PayPal (si tenemos orderId)
+          let orderDetails = null;
+          if (orderId) {
+            const orderRes = await fetch(`${paypalApiBase}/v2/checkout/orders/${encodeURIComponent(orderId)}`, {
+              method: 'GET',
+              headers: {
+                'Authorization': `Bearer ${paypalToken}`,
+                'Content-Type': 'application/json'
+              }
+            }).catch(() => null);
+
+            if (orderRes) {
+              try { orderDetails = await orderRes.json(); } catch (e) { orderDetails = null; }
+            }
+          }
+
+          // 3. Intentar extraer el email desde la respuesta de PayPal
+          const recoveredEmail = (orderDetails && orderDetails.payer && (orderDetails.payer.email_address || orderDetails.payer.email)) || (orderDetails && orderDetails.payer_email) || '';
+          if (recoveredEmail) {
+            email = String(recoveredEmail).trim().toLowerCase();
+            await logAccess(null, 'paypal_webhook_email_recovered', { orderId, email });
+            // continuar el flujo normal usando `email`
+          } else {
+            await logAccess(null, 'paypal_webhook_no_email_final', { orderId });
+            return res.status(200).send('ok_no_email');
+          }
+        } catch (err) {
+          console.warn('Error recuperando email vía PayPal API:', err?.message || err);
+          await logAccess(null, 'paypal_webhook_no_email_failed', { orderId, err: err?.message || err });
+          return res.status(200).send('ok_no_email');
+        }
       }
 
       try {
