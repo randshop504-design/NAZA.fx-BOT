@@ -1,7 +1,7 @@
 {
   "name": "naza-bot",
   "version": "5.0.2",
-  "description": "NAZA Trading Academy Bot - Discord + OAuth2 + WHOP webhooks (clean)",
+  "description": "NAZA Trading Academy Bot - Discord + OAuth2 + PayPal webhooks",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -14,7 +14,8 @@
     "@sendgrid/mail": "^8.1.5",
     "body-parser": "^1.20.2",
     "helmet": "^7.0.0",
-    "express-rate-limit": "^7.0.0"
+    "express-rate-limit": "^7.0.0",
+    "node-fetch": "^2.6.9"
   },
   "engines": {
     "node": ">=18.0.0"
