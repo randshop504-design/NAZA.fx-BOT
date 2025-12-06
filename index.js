@@ -1,11 +1,25 @@
 // index_whop_with_naza_email.js
 // Node >=18 required
+require('dotenv').config();
 const express = require('express');
 const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
-const fetch = global.fetch || require('node-fetch');
+// fetch: use global.fetch if available (Node 18+), otherwise try node-fetch (CommonJS fallback)
+let fetch = global.fetch;
+if (!fetch) {
+  try {
+    // require('node-fetch') might fail in ESM-only installs; this is a best-effort fallback
+    // If your environment uses ESM-only node-fetch, keep native fetch (Node 18+) or use an adapter.
+    // This fallback will work in many CommonJS deployments that have node-fetch installed.
+    // eslint-disable-next-line global-require
+    fetch = require('node-fetch');
+  } catch (e) {
+    // leave fetch undefined; code paths assume fetch exists in Node >=18
+    fetch = undefined;
+  }
+}
 const app = express();
 
 // NOTE: we intentionally DO NOT call express.json() / urlencoded() here so the webhook route can receive raw body
@@ -493,16 +507,17 @@ app.post('/webhook/paypal', express.raw({ type: '*/*', limit: '10mb' }), async (
       try { rawText = JSON.stringify(rawBody); } catch (e) { rawText = String(rawBody); }
     } else rawText = String(rawBody || '');
 
-    // Optional: verify signature if configured
+    // Normalize headers to lower-case access
     const headerLower = {};
     for (const k of Object.keys(req.headers || {})) headerLower[k.toLowerCase()] = req.headers[k];
+
     if (PAYPAL_WEBHOOK_ID) {
       const verify = await verifyPayPalSignature(rawText, {
-        'paypal-auth-algo': req.headers['paypal-auth-algo'] || req.headers['paypal_auth_algo'],
-        'paypal-cert-url': req.headers['paypal-cert-url'] || req.headers['paypal_cert_url'],
-        'paypal-transmission-id': req.headers['paypal-transmission-id'] || req.headers['paypal_transmission_id'] || req.headers['paypal-transmission-id'.toLowerCase()],
-        'paypal-transmission-sig': req.headers['paypal-transmission-sig'] || req.headers['paypal_transmission_sig'],
-        'paypal-transmission-time': req.headers['paypal-transmission-time'] || req.headers['paypal_transmission_time']
+        'paypal-auth-algo': headerLower['paypal-auth-algo'] || headerLower['paypal_auth_algo'] || headerLower['paypal-auth-algo'],
+        'paypal-cert-url': headerLower['paypal-cert-url'] || headerLower['paypal_cert_url'],
+        'paypal-transmission-id': headerLower['paypal-transmission-id'] || headerLower['paypal_transmission_id'],
+        'paypal-transmission-sig': headerLower['paypal-transmission-sig'] || headerLower['paypal_transmission_sig'],
+        'paypal-transmission-time': headerLower['paypal-transmission-time'] || headerLower['paypal_transmission_time']
       });
       if (!verify.ok) {
         await logAccess(null, 'paypal_signature_invalid', { reason: verify.reason || verify.verification || verify.error });
