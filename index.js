@@ -34,9 +34,10 @@ const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL;
 const GUILD_ID = process.env.GUILD_ID;
 // Role envs (use the ones you provided)
-const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUAL || process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUALDISCORD;
-const ROLE_ID_MENSUAL = process.env.ROLE_ID_MENSUAL || process.env.ROLE_ID_MENSUALDISCORD || process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_SENALES || process.env.ROLE_ID_MENSUAL;
-const ROLE_ID_TRIMESTRAL = process.env.ROLE_ID_TRIMESTRAL || process.env.ROLE_ID_TRIMESTRALDISCORD || process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL;
+// Defaults set to your provided IDs (intencional: trimestral == anual)
+const ROLE_ID_ANUAL = process.env.ROLE_ID_ANUAL || '1432149252016177233';
+const ROLE_ID_MENSUAL = process.env.ROLE_ID_MENSUAL || '1430906969630183830';
+const ROLE_ID_TRIMESTRAL = process.env.ROLE_ID_TRIMESTRAL || '1432149252016177233';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
@@ -196,35 +197,9 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
   email = (email || '').trim().toLowerCase();
   if (!email) throw new Error('Email requerido para crear claim');
 
-  // 1) verificar membership existente SOLO si está activa
-  const { data: existingMembership, error: memErr } = await supabase
-    .from('memberships')
-    .select('id, status')
-    .eq('email', email)
-    .eq('status', 'active')
-    .limit(1);
-  if (memErr) {
-    console.error('Error consultando memberships:', memErr);
-    throw new Error('Error interno');
-  }
-  if (existingMembership && existingMembership.length > 0) {
-    throw new Error('Este correo ya está registrado');
-  }
-
-  // 2) verificar claim pendiente (solo used = false)
-  const { data: existingClaimsForEmail, error: claimErr } = await supabase
-    .from('claims')
-    .select('id, used')
-    .eq('email', email)
-    .eq('used', false)
-    .limit(1);
-  if (claimErr) {
-    console.error('Error consultando claims por email:', claimErr);
-    throw new Error('Error interno');
-  }
-  if (existingClaimsForEmail && existingClaimsForEmail.length > 0) {
-    throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
-  }
+  // Nota: quitamos las restricciones que impedían memberships/claims duplicados.
+  // El sistema aceptará múltiples purchases por email — cada claim sigue siendo único.
+  // (Si quieres reactivar alguna validación de límite, la podemos añadir después.)
 
   // 3) verificar uso de tarjeta / fingerprint
   if (paymentFingerprint && paymentFingerprint.toString().trim() !== '') {
@@ -250,24 +225,6 @@ async function createClaimToken({ email, name, plan_id, subscriptionId, customer
       throw new Error('Esta tarjeta/método de pago ya está asociada a dos cuentas distintas. Contacta soporte.');
     }
   }
-
-  // Recheck quick to reduce race
-  const [{ data: recheckMembership }, { data: recheckClaim }] = await Promise.all([
-    supabase
-      .from('memberships')
-      .select('id, status')
-      .eq('email', email)
-      .eq('status', 'active')
-      .limit(1),
-    supabase
-      .from('claims')
-      .select('id,used')
-      .eq('email', email)
-      .eq('used', false)
-      .limit(1)
-  ]);
-  if (recheckMembership && recheckMembership.length > 0) throw new Error('Este correo ya está registrado');
-  if (recheckClaim && recheckClaim.length > 0) throw new Error('Existe ya una solicitud para este correo. Revisa tu email.');
 
   // generate plain token and store it directly (PLANO)
   const token = crypto.randomBytes(24).toString('hex'); // 48 chars plain token to email
@@ -664,18 +621,8 @@ app.post('/webhook/paypal', express.raw({ type: '*/*', limit: '10mb' }), async (
       }
 
       try {
-        // If an active membership exists for this email -> noop
-        const { data: members, error: memErr } = await supabase
-          .from('memberships')
-          .select('id,status')
-          .eq('email', email)
-          .eq('status', 'active')
-          .limit(1);
-        if (memErr) console.warn('memErr checking membership in webhook:', memErr);
-        if (members && members.length > 0 && members[0].status === 'active') {
-          await logAccess(null, 'webhook_noop_member_already_active', { email, orderId });
-          return res.status(200).send('member already active');
-        }
+        // Permitimos crear nuevos claims/memberships aunque ya existan memberships activas.
+        // (Esto permite compras múltiples por el mismo email.)
 
         // Try reuse claim by subscription/order
         const { data: existingClaims } = await supabase
@@ -927,20 +874,8 @@ app.get('/discord/callback', async (req, res) => {
     const last4 = authData.last4 || '';
     const paymentFingerprint = authData.payment_fingerprint || '';
 
-    // check email conflict (active)
-    const { data: existingByEmail } = await supabase
-      .from('memberships')
-      .select('id,status')
-      .eq('email', email)
-      .eq('status','active')
-      .limit(1);
-    if (existingByEmail && existingByEmail.length > 0) {
-      await logAccess(null, 'conflict_detected', { reason: 'email_active', email });
-      await supabase.from('claims').update({ manual_review: true }).eq('token', state).catch(()=>{});
-      return res.status(400).send('Conflicto: este correo ya tiene una membresía activa. Contacta soporte.');
-    }
-
-    // check payment fingerprint conflict
+    // Removed blocking check: allow multiple memberships per same email (as requested)
+    // check payment fingerprint conflict remains
     if (paymentFingerprint && paymentFingerprint.trim() !== '') {
       const { data: fpRows } = await supabase
         .from('memberships')
