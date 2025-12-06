@@ -2,10 +2,10 @@
   "name": "naza-bot",
   "version": "5.0.2",
   "description": "NAZA Trading Academy Bot - Discord + OAuth2 + PayPal webhooks",
-  "main": "index.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node index.js",
-    "start:dev": "DEBUG=* node index.js"
+    "start": "node src/index.js",
+    "start:dev": "DEBUG=* node src/index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -15,7 +15,8 @@
     "body-parser": "^1.20.2",
     "helmet": "^7.0.0",
     "express-rate-limit": "^7.0.0",
-    "node-fetch": "^2.6.9"
+    "node-fetch": "^2.6.9",
+    "dotenv": "^16.1.4"
   },
   "engines": {
     "node": ">=18.0.0"
