@@ -10,13 +10,8 @@ const crypto = require('crypto');
 let fetch = global.fetch;
 if (!fetch) {
   try {
-    // require('node-fetch') might fail in ESM-only installs; this is a best-effort fallback
-    // If your environment uses ESM-only node-fetch, keep native fetch (Node 18+) or use an adapter.
-    // This fallback will work in many CommonJS deployments that have node-fetch installed.
-    // eslint-disable-next-line global-require
     fetch = require('node-fetch');
   } catch (e) {
-    // leave fetch undefined; code paths assume fetch exists in Node >=18
     fetch = undefined;
   }
 }
@@ -54,14 +49,16 @@ const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
 const PAYPAL_SECRET = process.env.PAYPAL_SECRET || '';
 const PAYPAL_ENV = process.env.PAYPAL_ENV || 'sandbox'; // 'live' or 'sandbox'
 
+// ADMIN / SIMPLE ORDER AUTH (you asked password fixed)
+const ADMIN_KEY = process.env.ADMIN_KEY || 'admin123';
+const ORDER_PASSWORD = process.env.ORDER_PASSWORD || 'Alex13102001$$$';
+
 // ============================================
 // PRODUCT ID -> ROLE mapping (use your known product ids)
 const PRODUCT_ROLE_MAP = {
-  // example product ids you showed earlier; adjust if different
-  'NRH364VHDNAX6': ROLE_ID_MENSUAL,       // plan mensual
-  'WB6B3EEG4T8RQ': ROLE_ID_TRIMESTRAL,    // plan trimestral
-  'CFQ2Z3QEDSJYS': ROLE_ID_ANUAL,         // plan anual
-  // keep old prod_* mapping if you also use them (safe to include)
+  'NRH364VHDNAX6': ROLE_ID_MENSUAL,
+  'WB6B3EEG4T8RQ': ROLE_ID_TRIMESTRAL,
+  'CFQ2Z3QEDSJYS': ROLE_ID_ANUAL,
   'prod_VD83C9VQ7qYjF': ROLE_ID_MENSUAL,
   'prod_8ITa0Ux0IajNA': ROLE_ID_TRIMESTRAL,
   'prod_7Uun6u558QKNs': ROLE_ID_ANUAL
@@ -125,7 +122,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-frontend-token, x-signature');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-frontend-token, x-signature, x-admin-key');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -307,7 +304,7 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 
                     <div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:18px;">
                       <p style="margin:0 0 8px 0;"><strong>Únete a la comunidad y mantente al día</strong></p>
-                      <p style="margin:0 0 12px 0;color:#d6e6f8">Para ver anuncios oficiales, horarios de clases, avisos de sesiones en vivo y formar parte de los chats (WhatsApp y Telegram), visita nuestro sitio y sigue las instrucciones para unirte a los grupos desde allí.</p>
+                      <p style="margin:0 0 12px 0;color:#d6e6f8">Para ver anuncios oficiales, horarios de clases y unirte a los chats (WhatsApp y Telegram), visita: https://nazatradingacademy.com</p>
                       <a href="https://nazatradingacademy.com" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:14px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;">https://nazatradingacademy.com</a>
                     </div>
 
@@ -747,6 +744,162 @@ app.post('/webhook/paypal', express.raw({ type: '*/*', limit: '10mb' }), async (
 // Restore express json/urlencoded for the rest of the app (moved AFTER webhook route on purpose)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ============================================
+// NEW ENDPOINT: Admin order via simple cURL (no HMAC, simple auth)
+app.post('/api/admin/order', async (req, res) => {
+  try {
+    // validate admin key header
+    const receivedAdminKey = (req.headers['x-admin-key'] || '').toString();
+    if (!receivedAdminKey || receivedAdminKey !== ADMIN_KEY) {
+      console.warn('Admin key missing or invalid');
+      return res.status(401).send('Unauthorized admin key');
+    }
+
+    const payload = req.body || {};
+    // check order password in body
+    if (!ORDER_PASSWORD || payload.order_password !== ORDER_PASSWORD) {
+      console.warn('Invalid order password');
+      return res.status(401).send('Invalid order password');
+    }
+
+    // basic validation
+    const { name, email, plan_id, last4, card_expiry, customer_id, subscription_id, discord_oauth_access_token, discord_id } = payload;
+    if (!email || !plan_id) return res.status(400).send('Missing email or plan_id');
+
+    const emailNormalized = String(email).trim().toLowerCase();
+
+    // determine role
+    const roleId = (function getRoleIdForPlan(planId) {
+      if (PRODUCT_ROLE_MAP[planId]) return PRODUCT_ROLE_MAP[planId];
+      const planKey = detectPlanKeyFromString(planId);
+      const mapping = {
+        'plan_mensual': ROLE_ID_MENSUAL,
+        'plan_trimestral': ROLE_ID_TRIMESTRAL,
+        'plan_anual': ROLE_ID_ANUAL
+      };
+      return mapping[planKey] || ROLE_ID_MENSUAL;
+    })(plan_id);
+
+    // compute start_at and expires_at (30/90/365)
+    const startAt = new Date();
+    const planKey = detectPlanKeyFromString(plan_id);
+    const daysMap = { 'plan_mensual': 30, 'plan_trimestral': 90, 'plan_anual': 365 };
+    const days = daysMap[planKey] || 30;
+    const expiresAt = new Date(startAt.getTime() + (days * 24 * 60 * 60 * 1000));
+
+    // Insert membership row
+    const membershipRow = {
+      email: emailNormalized,
+      name: name || '',
+      plan_id: plan_id,
+      subscription_id: subscription_id || '',
+      customer_id: customer_id || '',
+      discord_id: discord_id || null,
+      discord_username: null,
+      status: 'active',
+      role_id: roleId,
+      last4: last4 || '',
+      card_expiry: card_expiry || '',
+      payment_fingerprint: payload.payment_fingerprint || '',
+      start_at: startAt.toISOString(),
+      expires_at: expiresAt.toISOString(),
+      role_assigned: false,
+      pending_role_assignment: true,
+      created_at: new Date().toISOString()
+    };
+
+    const { error: insErr, data: insData } = await supabase.from('memberships').insert([membershipRow]).select().limit(1);
+    if (insErr) {
+      console.error('Error guardando membership por admin:', insErr);
+      return res.status(500).send('Error creando membresía');
+    }
+    const createdMembership = (insData && insData[0]) ? insData[0] : null;
+    await logAccess(createdMembership ? createdMembership.id : null, 'membership_created_admin', { email: emailNormalized, plan: plan_id });
+
+    // If admin provided a discord_oauth_access_token, optionally add user to guild and assign role
+    if (discord_oauth_access_token && DISCORD_BOT_TOKEN && GUILD_ID) {
+      try {
+        // get user info from token
+        const userResponse = await fetch('https://discord.com/api/users/@me', {
+          headers: { Authorization: `Bearer ${discord_oauth_access_token}` }
+        });
+        const userData = await userResponse.json();
+        if (userData && userData.id) {
+          const dId = userData.id;
+          // try invite via bot (PUT members)
+          try {
+            await fetch(`https://discord.com/api/guilds/${GUILD_ID}/members/${dId}`, {
+              method: 'PUT',
+              headers: {
+                'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ access_token: discord_oauth_access_token })
+            });
+          } catch (e) {
+            console.warn('Invite add maybe failed (admin flow):', e?.message || e);
+          }
+          // assign role with retries
+          let roleAssigned = false;
+          for (let attempt = 0; attempt < 4; attempt++) {
+            try {
+              const guild = await discordClient.guilds.fetch(GUILD_ID);
+              const member = await guild.members.fetch(dId);
+              await member.roles.add(roleId);
+              roleAssigned = true;
+              await logAccess(createdMembership.id, 'role_assigned_admin', { discordId: dId, roleId });
+              break;
+            } catch (err) {
+              console.warn(`Attempt ${attempt+1} failed assigning role (admin):`, err?.message || err);
+              await logAccess(createdMembership.id, 'role_assign_failed_admin', { attempt: attempt+1, err: err?.message || err });
+              await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
+            }
+          }
+          if (roleAssigned) {
+            await supabase.from('memberships').update({ role_assigned: true, pending_role_assignment: false, discord_id: dId, discord_username: userData.username }).eq('id', createdMembership.id).catch(()=>{});
+          } else {
+            await logAccess(createdMembership.id, 'role_assign_permanent_fail_admin', { roleId });
+          }
+        }
+      } catch (err) {
+        console.warn('Error in admin discord invite/assign flow:', err?.message || err);
+      }
+    } else if (discord_id && DISCORD_BOT_TOKEN && GUILD_ID) {
+      // If admin sends discord_id directly, try to assign role directly
+      try {
+        let roleAssigned = false;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          try {
+            const guild = await discordClient.guilds.fetch(GUILD_ID);
+            const member = await guild.members.fetch(discord_id);
+            await member.roles.add(roleId);
+            roleAssigned = true;
+            await logAccess(createdMembership.id, 'role_assigned_admin_direct', { discordId: discord_id, roleId });
+            break;
+          } catch (err) {
+            console.warn(`Attempt ${attempt+1} failed assigning role by discord_id (admin):`, err?.message || err);
+            await logAccess(createdMembership.id, 'role_assign_failed_admin_direct', { attempt: attempt+1, err: err?.message || err });
+            await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
+          }
+        }
+        if (roleAssigned) {
+          await supabase.from('memberships').update({ role_assigned: true, pending_role_assignment: false }).eq('id', createdMembership.id).catch(()=>{});
+        } else {
+          await logAccess(createdMembership.id, 'role_assign_permanent_fail_admin', { roleId });
+        }
+      } catch (err) {
+        console.warn('Error assigning role by discord_id (admin):', err?.message || err);
+      }
+    }
+
+    // return created membership id
+    return res.json({ success: true, membership_id: createdMembership ? createdMembership.id : null });
+  } catch (err) {
+    console.error('Error in /api/admin/order:', err?.message || err);
+    return res.status(500).send('Error interno');
+  }
+});
 
 // ============================================
 // ROUTE: claim redirect
