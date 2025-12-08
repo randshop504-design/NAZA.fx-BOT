@@ -1,13 +1,12 @@
 {
   "name": "naza-bot",
-  "version": "5.0.3",
-  "description": "NAZA Trading Academy Bot - Discord + OAuth2 + Supabase + SendGrid",
+  "version": "5.0.4",
+  "description": "NAZA Trading Academy Bot",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "start:dev": "DEBUG=* node src/index.js",
-    "lint": "echo \"No lint configured\""
+    "start:dev": "DEBUG=* node src/index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -16,9 +15,8 @@
     "@sendgrid/mail": "^8.1.5",
     "helmet": "^7.0.0",
     "express-rate-limit": "^7.0.0",
-    "dotenv": "^16.1.4"
+    "dotenv": "^16.1.4",
+    "braintree": "^3.0.0"
   },
-  "engines": {
-    "node": "18.x"
-  }
+  "engines": { "node": "18.x" }
 }
