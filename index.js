@@ -763,7 +763,7 @@ app.get('/discord/callback', async (req, res) => {
 });
 
 // ============================================
-// EXPIRACIONES AUTOMÁTICAS
+// EXPIRACIONES AUTOMÁTICAS (REEMPLAZADA POR VERSIÓN MEJORADA)
 async function expireMemberships() {
   try {
     console.log('⏱️ Chequeando memberships expiradas...');
@@ -784,26 +784,66 @@ async function expireMemberships() {
       return;
     }
 
+    // Pre-definidos: lista de roleIds que consideramos remover si no encontramos role por plan.
+    const fallbackRoleIds = [
+      ROLE_ID_SENALESDISCORD,
+      ROLE_ID_MENTORIADISCORD,
+      ROLE_ID_ANUALDISCORD
+    ].filter(Boolean); // quitar valores vacíos
+
     for (const m of rows) {
       try {
-        const roleId = getRoleIdForPlan(m.plan || m.plan_id);
+        console.log(`🔁 Procesando membership id=${m.id || m.claim} plan=${m.plan} discord_id=${m.discord_id}`);
 
-        // 1) Si tenemos discord_id y roleId, intentar remover el rol
-        if (m.discord_id && roleId) {
-          try {
-            await removeDiscordRole(m.discord_id, roleId);
-          } catch (err) {
-            console.error('removeDiscordRole error:', err);
-          }
+        // Elegir roleId principal según plan (si existe)
+        let roleId = getRoleIdForPlan(m.plan || m.plan_id);
+
+        // Si no encontramos roleId por plan, intentamos usar fallbackRoleIds
+        const tryRoleIds = roleId ? [roleId] : fallbackRoleIds;
+        if (!tryRoleIds || tryRoleIds.length === 0) {
+          console.warn(`⚠️ No hay roleIds configurados en env y no se pudo mapear plan (${m.plan}). Saltando intento de remoción de rol.`);
         }
 
-        // Nota: Ya no expulsamos (kick) al usuario. Solo quitamos el rol como pidió el cliente.
+        // 1) Si tenemos discord_id y role(s) posibles, intentar remover los roles encontrados
+        if (m.discord_id && tryRoleIds && tryRoleIds.length > 0) {
+          for (const rId of tryRoleIds) {
+            try {
+              console.log(`➡️ Intentando remover role ${rId} de discord_id ${m.discord_id} (membership ${m.id || m.claim})`);
+              const removed = await removeDiscordRole(m.discord_id, rId);
+              console.log(`Resultado removeDiscordRole role=${rId} -> ${removed}`);
+              // Si fue removido con éxito o no existía, seguimos intentando con los demás (no es fatal)
+            } catch (err) {
+              console.error(`❌ Error removiendo role ${rId} de ${m.discord_id}:`, err);
+            }
+          }
 
-        // 2) Marcar membership como revocada en la DB
+          // Adicional: como verificación, intentamos fetch del miembro y mostramos roles que aún tenga (debug)
+          try {
+            if (discordClient && discordClient.guilds) {
+              try {
+                const guild = await discordClient.guilds.fetch(GUILD_ID);
+                const member = await guild.members.fetch(m.discord_id);
+                const stillHas = member.roles.cache ? member.roles.cache.map(r => r.id) : [];
+                console.log(`🔎 Verificación miembro ${m.discord_id} roles actuales: ${JSON.stringify(stillHas).substring(0,800)}`);
+              } catch (err) {
+                console.warn('No se pudo fetch member para verificación (posible que no esté en el guild):', err?.message || err);
+              }
+            }
+          } catch (e) {
+            console.warn('Advertencia durante verificación de roles:', e);
+          }
+        } else {
+          console.log(`ℹ️ No hay discord_id para membership ${m.id || m.claim} o no hay roleIds para intentar.`);
+        }
+
+        // 2) Marcar membership como revocada en la DB (hacerlo incluso si no tenía discord_id)
         const updates = { active: false, revoked_at: new Date().toISOString() };
         const { error: updErr } = await supabase.from('memberships').update(updates).eq('id', m.id);
-        if (updErr) console.error('Error marcando revocada:', updErr);
-        else console.log(`✅ Membership ${m.id || m.claim} marcada como revocada.`);
+        if (updErr) {
+          console.error('Error marcando revocada:', updErr);
+        } else {
+          console.log(`✅ Membership ${m.id || m.claim} marcada como revocada.`);
+        }
       } catch (innerErr) {
         console.error('Error procesando membership expirada:', innerErr);
       }
