@@ -453,6 +453,7 @@ app.post('/redeem-claim', async (req, res) => {
     const { claim, discordId } = req.body || {};
     if (!claim) return res.status(400).json({ success:false, message:'claim es requerido' });
 
+    // Buscamos la membership existente (aseguramos que used === false y active === true)
     const { data: rows, error: fetchErr } = await supabase.from('memberships').select('*').eq('claim', claim).limit(1);
     if (fetchErr) {
       console.error('Error consultando membership por claim:', fetchErr);
@@ -461,10 +462,12 @@ app.post('/redeem-claim', async (req, res) => {
     if (!rows || rows.length === 0) return res.status(404).json({ success:false, message:'Claim no encontrado' });
     const membership = rows[0];
 
+    // Reject if already used or inactive
     if (membership.used === true || membership.active === false) {
       return res.status(400).json({ success:false, message:'Este claim ya fue usado o la membership no está activa' });
     }
 
+    // Hacemos un UPDATE condicional para prevenir race conditions (solo actualizamos si used === false)
     const updates = {
       used: true,
       active: false,
@@ -472,10 +475,22 @@ app.post('/redeem-claim', async (req, res) => {
     };
     if (discordId) updates.discord_id = discordId;
 
-    const { data: updateData, error: updateErr } = await supabase.from('memberships').update(updates).eq('claim', claim).select().limit(1);
+    const { data: updateData, error: updateErr } = await supabase
+      .from('memberships')
+      .update(updates)
+      .eq('claim', claim)
+      .eq('used', false)
+      .select()
+      .limit(1);
+
     if (updateErr) {
       console.error('Error actualizando membership:', updateErr);
       return res.status(500).json({ success:false, message:'Error interno' });
+    }
+
+    // Si no se obtuvo fila actualizada, fue porque alguien más la reclamó simultáneamente
+    if (!updateData || (Array.isArray(updateData) && updateData.length === 0)) {
+      return res.status(400).json({ success:false, message:'Este claim ya fue utilizado (concurrency) o no está disponible' });
     }
 
     // Asignar rol si discordId fue pasado
@@ -497,6 +512,7 @@ app.post('/redeem-claim', async (req, res) => {
 });
 
 // ============================================
+
 // RUTA: /api/auth/claim  -> redirige al OAuth de Discord (el link que mandamos por email)
 app.get('/api/auth/claim', async (req, res) => {
   const token = req.query.token || req.query.state;
