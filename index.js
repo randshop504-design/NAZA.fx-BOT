@@ -146,6 +146,49 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 }
 
 // ============================================
+// == AGREGADO: Plantilla + función para RE-INVITACIÓN AUTOMÁTICA al expirar
+// ============================================
+function buildReinviteEmailHtml({ name, siteUrl, supportEmail }) {
+  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="color-scheme" content="dark light"><meta name="supported-color-schemes" content="dark light"><style>@media (prefers-color-scheme: dark) { .wrap { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important; } }</style></head><body style="margin:0;padding:0;background-color:#000000;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;"><tr><td align="center" valign="top"><table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;"><tr><td style="padding:0 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);"><tr><td style="padding:28px 24px 8px 24px;text-align:center;"><div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a);"><img src="${logoPath}" alt="NAZA logo" width="96" height="96" style="display:block;width:96px;height:96px;object-fit:cover;transform:scale(1.12);border-radius:50%;" /></div><h1 style="color:#ff9b3b;margin:18px 0 8px 0;font-size:26px;font-family:Arial,sans-serif;">Te extrañamos — NAZA Trading Academy</h1><div style="color:#cbd5e1;margin:6px 0 20px 0;font-size:16px;font-family:Arial,sans-serif;">Tus privilegios han expirado, pero la puerta está abierta para volver.</div></td></tr><tr><td style="padding:20px 28px 28px 28px;color:#d6e6f8;font-family:Arial,sans-serif;line-height:1.5;"><div style="font-size:15px;margin-bottom:12px;"><strong>Hola ${escapeHtml(name || 'amigo')},</strong></div><div style="font-size:15px;color:#d6e6f8;margin-bottom:12px;">Lamentablemente tus privilegios de acceso a los canales exclusivos y materiales de NAZA Trading Academy han finalizado. Queremos invitarte a volver: si te interesa retomar el aprendizaje y recuperar acceso, puedes comprar nuevamente y en minutos tendrás todo listo.</div><div style="text-align:center;margin:22px 0;"><a href="${siteUrl}" style="display:inline-block;background:#2d9bf0;color:#ffffff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(45,155,240,0.15);font-family:Arial,sans-serif;">Volver a comprar / Reactivar</a><div style="color:#9fb0c9;font-size:13px;margin-top:8px;font-family:Arial,sans-serif;">Haz clic para visitar nuestra página y seleccionar el plan que prefieras.</div></div><div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:16px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:8px;"><p style="margin:0 0 8px 0;"><strong>¿Necesitas ayuda?</strong></p><p style="margin:0;color:#d6e6f8">Si tienes dudas sobre tu cuenta o formas de pago, contáctanos y te ayudamos a reactivar el acceso.</p><a href="mailto:${supportEmail || SUPPORT_EMAIL}" style="display:inline-block;margin-top:12px;padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);text-decoration:none;color:#d6e6f8;font-weight:600;background:transparent;font-family:Arial,sans-serif;">Contactar soporte</a></div><div style="font-size:13px;color:#9fb0c9;margin-top:14px;font-family:Arial,sans-serif;"><div><strong>Resumen:</strong></div><div style="margin-top:6px;">Estado: Privilegios finalizados</div><div style="margin-top:6px;">Visita: <a href="${siteUrl}" target="_blank" style="color:#bfe0ff;text-decoration:none">${siteUrl}</a></div></div></td></tr><tr><td style="padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;"><div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: <a href="mailto:${supportEmail || SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${supportEmail || SUPPORT_EMAIL}</a></div></td></tr></table></td></tr></table></td></tr></table></body></html>`;
+}
+
+function buildReinviteText({ name, siteUrl, supportEmail }) {
+  return `Hola ${name || 'amigo'},\n\nTe escribimos para informarte que tus privilegios de acceso a NAZA Trading Academy han finalizado.\n\nSi quieres volver a acceder a los cursos, canales y contenido exclusivo, te invitamos a visitar:\n${siteUrl}\n\nSi necesitas ayuda para reactivar tu cuenta o tienes dudas sobre métodos de pago, contáctanos: ${supportEmail || SUPPORT_EMAIL}\n\n¡Te esperamos de nuevo!\n— NAZA Trading Academy`;
+}
+
+async function sendReinviteEmail(email, name, extra = {}) {
+  if (!SENDGRID_API_KEY) {
+    console.error('❌ No hay SENDGRID_API_KEY configurada. Abortando envío de re-invitación.');
+    throw new Error('SENDGRID_API_KEY no configurada');
+  }
+
+  const siteUrl = extra.siteUrl || (FRONTEND_URL ? FRONTEND_URL : 'https://www.nazatradingacademy.com');
+  const supportEmail = SUPPORT_EMAIL || extra.supportEmail || 'support@nazatradingacademy.com';
+
+  const html = buildReinviteEmailHtml({ name, siteUrl, supportEmail });
+  const text = buildReinviteText({ name, siteUrl, supportEmail });
+
+  const msg = {
+    to: email,
+    from: FROM_EMAIL,
+    subject: `Te extrañamos — Reactiva tu acceso en NAZA Trading Academy`,
+    text,
+    html
+  };
+
+  try {
+    const result = await sgMail.send(msg);
+    console.log('✅ Re-invite email enviado a:', email, 'status:', result?.[0]?.statusCode || 'unknown');
+    return true;
+  } catch (err) {
+    console.error('❌ Error enviando re-invite email:', err?.message || err);
+    if (err?.response?.body) console.error('SendGrid response body:', err.response.body);
+    throw err;
+  }
+}
+
+// ============================================
 // FUNCIONES PARA ASIGNAR / QUITAR ROLES (API REST + fallback discord.js)
 // Añadimos logging más claro para depuración.
 async function addRoleToMemberViaApi(discordId, roleId) {
@@ -207,7 +250,7 @@ async function removeRoleFromMemberViaApi(discordId, roleId) {
     try { body = await resp.text(); } catch(e) {}
     console.log(`DEBUG removeRoleViaApi -> status: ${status}, body: ${String(body).substring(0,400)}`);
     if (resp && resp.status === 204) {
-      console.log(`✅ Rol ${roleId} removido via API de ${discordId}`);
+      console.log(`✅ Rol ${roleId} removido vía API de ${discordId}`);
       return true;
     } else {
       console.warn(`⚠️ API removeRole responded ${status}: ${body}`);
@@ -660,8 +703,22 @@ async function expireMemberships() {
         // 2) Marcar membership como revocada en la DB
         const updates = { active: false, revoked_at: new Date().toISOString() };
         const { error: updErr } = await supabase.from('memberships').update(updates).eq('id', m.id);
-        if (updErr) console.error('Error marcando revocada:', updErr);
-        else console.log(`✅ Membership ${m.id || m.claim} marcada como revocada.`);
+        if (updErr) {
+          console.error('Error marcando revocada:', updErr);
+        } else {
+          console.log(`✅ Membership ${m.id || m.claim} marcada como revocada.`);
+
+          // 3) ENVIAR EMAIL DE RE-INVITACIÓN AUTOMÁTICA
+          try {
+            if (m.email) {
+              await sendReinviteEmail(m.email, m.name, { siteUrl: FRONTEND_URL || 'https://www.nazatradingacademy.com' });
+            } else {
+              console.log('ℹ️ Membership sin email — no se envió re-invitación.');
+            }
+          } catch (emailErr) {
+            console.error('❌ Error enviando email de re-invitación:', emailErr);
+          }
+        }
       } catch (innerErr) {
         console.error('Error procesando membership expirada:', innerErr);
       }
