@@ -28,7 +28,8 @@ const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD || process.env.ROL
 const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL || '';
 const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_MENSUAL || '';
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
-const API_PASSWORD = process.env.API_PASSWORD || 'change_this_password';
+// <-- se pidió explícitamente usar literal exacto: Alex13102001$$$
+const API_PASSWORD = process.env.API_PASSWORD || 'Alex13102001$$$';
 
 // Configure SendGrid
 if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
@@ -61,7 +62,7 @@ discordClient.once('ready', () => {
 // Utilities
 function escapeHtml(str) {
   if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\'/g,'&#39;');
 }
 function validatePasswordFromBody(req) {
   const sent = (req.body && req.body.password) ? String(req.body.password) : '';
