@@ -2,11 +2,11 @@
   "name": "naza-bot",
   "version": "5.0.4",
   "description": "NAZA Trading Academy Bot - Discord + OAuth2 + Supabase + SendGrid",
-  "main": "src/index.js",
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/index.js",
-    "start:dev": "DEBUG=* node src/index.js"
+    "start": "node index.js",
+    "start:dev": "DEBUG=* node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
