@@ -27,6 +27,7 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
 const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL || '';
 const GUILD_ID = process.env.GUILD_ID || '';
+// aceptamos tanto VARIANTES con sufijo _DISCORD como las que mostraste (ROLE_ID_ANUAL, ROLE_ID_MENSUAL, ROLE_ID_TRIMESTRAL)
 const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUAL || '';
 const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL || '';
 const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_MENSUAL || '';
@@ -95,7 +96,31 @@ function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email
 }
 
 function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail, email, token }) {
-  return `Hola ${name || 'usuario'}, ¡Bienvenido a NAZA Trading Academy!\n\nTu suscripción ha sido activada correctamente.\n\nEntrega del servicio:\nTodos los privilegios de tu plan —cursos, clases en vivo, análisis y canales exclusivos— se entregan a través de Discord. Al pulsar "Obtener acceso" se te asignará automáticamente el rol correspondiente y se desbloquearán los canales de tu plan.\n\nÚnete a la comunidad:\nPara anuncios oficiales, horarios de clases y unirte a los chats (WhatsApp y Telegram), visita: https://nazatradingacademy.com\n\nSi no tienes Discord:\n- Descargar Discord: https://discord.com/download\n- Cómo crear una cuenta (ES): https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr\n\nEnlace para obtener acceso (un solo uso — válido hasta completar registro):\n${claimUrl}\n\nDetalles:\nPlan: ${planName}\nID de suscripción: ${subscriptionId || ''}\nEmail: ${email || ''}\n\nSoporte: ${SUPPORT_EMAIL || 'support@nazatradingacademy.com'}\n\nNota: El enlace es de un solo uso y funcionará hasta que completes el proceso en Discord.`;
+  return `Hola ${name || 'usuario'}, ¡Bienvenido a NAZA Trading Academy!
+
+Tu suscripción ha sido activada correctamente.
+
+Entrega del servicio:
+Todos los privilegios de tu plan —cursos, clases en vivo, análisis y canales exclusivos— se entregan a través de Discord. Al pulsar "Obtener acceso" se te asignará automáticamente el rol correspondiente y se desbloquearán los canales de tu plan.
+
+Únete a la comunidad:
+Para anuncios oficiales, horarios de clases y unirte a los chats (WhatsApp y Telegram), visita: https://nazatradingacademy.com
+
+Si no tienes Discord:
+- Descargar Discord: https://discord.com/download
+- Cómo crear una cuenta (ES): https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr
+
+Enlace para obtener acceso (un solo uso — válido hasta completar registro):
+${claimUrl}
+
+Detalles:
+Plan: ${planName}
+ID de suscripción: ${subscriptionId || ''}
+Email: ${email || ''}
+
+Soporte: ${SUPPORT_EMAIL || 'support@nazatradingacademy.com'}
+
+Nota: El enlace es de un solo uso y funcionará hasta que completes el proceso en Discord.`;
 }
 
 async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId, extra = {}, existingToken = null) {
@@ -283,18 +308,44 @@ function calculateExpiryDate(plan) {
 
 function getRoleIdForPlan(planId) {
   // == FIXED: devolver SOLO el role correspondiente al plan recibido.
-  // No hacer 'fallback' automático a otros role IDs.
-  const key = String(planId || '').toLowerCase().trim();
+  // Reconoce variantes comunes: "plan_anual", "plan anual", "anual", "plan-anual", etc.
+  // No hace fallback automático a otros role IDs; si no encuentra, devuelve null.
+  const raw = String(planId || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // remove accents
+  const key = raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
   const mapping = {
-    'plan_mensual': ROLE_ID_SENALESDISCORD,
-    'mensual': ROLE_ID_SENALESDISCORD,
-    'plan_trimestral': ROLE_ID_MENTORIADISCORD,
-    'trimestral': ROLE_ID_MENTORIADISCORD,
+    // ANUAL
     'plan_anual': ROLE_ID_ANUALDISCORD,
-    'anual': ROLE_ID_ANUALDISCORD
+    'plananual': ROLE_ID_ANUALDISCORD,
+    'anual': ROLE_ID_ANUALDISCORD,
+    'anual_plan': ROLE_ID_ANUALDISCORD,
+    'plan-anual': ROLE_ID_ANUALDISCORD,
+    'plan anual': ROLE_ID_ANUALDISCORD,
+
+    // TRIMESTRAL
+    'plan_trimestral': ROLE_ID_MENTORIADISCORD,
+    'plantrimestral': ROLE_ID_MENTORIADISCORD,
+    'trimestral': ROLE_ID_MENTORIADISCORD,
+    'trimestral_plan': ROLE_ID_MENTORIADISCORD,
+    'plan-trimestral': ROLE_ID_MENTORIADISCORD,
+    'plan trimestral': ROLE_ID_MENTORIADISCORD,
+
+    // MENSUAL / SENALES
+    'plan_mensual': ROLE_ID_SENALESDISCORD,
+    'planmensual': ROLE_ID_SENALESDISCORD,
+    'mensual': ROLE_ID_SENALESDISCORD,
+    'mensual_plan': ROLE_ID_SENALESDISCORD,
+    'plan-mensual': ROLE_ID_SENALESDISCORD,
+    'plan mensual': ROLE_ID_SENALESDISCORD
   };
-  if (mapping[key] && mapping[key].trim() !== '') return mapping[key];
-  return null; // si no coincide, devolver null (no asignar rol)
+
+  const role = mapping[key];
+  if (role && String(role).trim() !== '') {
+    return role;
+  }
+
+  // nada coincide -> devolver null (no asignar rol)
+  return null;
 }
 
 // ============================================
@@ -706,4 +757,3 @@ app.listen(PORT, () => {
   console.log('🔔 Discord token presente?', !!DISCORD_BOT_TOKEN);
   console.log('🔗 Supabase presente?', !!SUPABASE_URL);
 });
-
