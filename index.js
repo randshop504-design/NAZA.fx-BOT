@@ -398,8 +398,54 @@ app.post('/create-membership', async (req, res) => {
 // redeem-claim
 app.post('/redeem-claim', async (req, res) => {
   try {
-    if (!validatePasswordFromBody(req)) {
-      return res.status(401).json({ success:false, message: 'password inválida' });
+    if (!validatePasswordFromBody(req)) return res.status(401).json({ success:false, message:'password inválida' });
+    const { claim, discordId } = req.body || {};
+    if (!claim) return res.status(400).json({ success:false, message:'claim es requerido' });
+
+    // Fetch membership (read current state)
+    const { data: rows, error: fetchErr } = await supabase.from('memberships').select('*').eq('claim', claim).limit(1);
+    if (fetchErr) return res.status(500).json({ success:false, message:'Error interno' });
+    if (!rows || rows.length === 0) return res.status(404).json({ success:false, message:'Claim no encontrado' });
+    const membership = rows[0];
+
+    // Prevent reuse / revoked links
+    if (membership.used === true) return res.status(400).json({ success:false, message:'Este claim ya fue usado.' });
+    if (membership.revoked_at) return res.status(400).json({ success:false, message:'Este claim fue revocado.' });
+
+    // Atomic update: mark used, set redeemed_at and (optionally) discord_id
+    const updates = { used: true, active: false, redeemed_at: new Date().toISOString() };
+    if (discordId) updates.discord_id = discordId;
+
+    const { data: updateData, error: updateErr } = await supabase.from('memberships')
+      .update(updates)
+      .eq('claim', claim)
+      .eq('used', false)
+      .is('revoked_at', null)
+      .select()
+      .limit(1);
+
+    if (updateErr) return res.status(500).json({ success:false, message:'Error interno actualizando membership' });
+    if (!updateData || updateData.length === 0) return res.status(400).json({ success:false, message:'No se pudo canjear el claim. Probablemente ya fue usado.' });
+
+    const updatedMembership = Array.isArray(updateData) ? updateData[0] : updateData;
+
+    // Assign role if discordId provided or membership already had it
+    const finalDiscordId = discordId || updatedMembership.discord_id;
+    if (finalDiscordId) {
+      const roleId = getRoleIdForPlan(updatedMembership.plan || updatedMembership.plan_id);
+      if (roleId) {
+        await assignDiscordRole(finalDiscordId, roleId).catch(err => console.error('assignDiscordRole redeem-claim err:', err));
+      } else {
+        console.warn('No role found for plan in redeem-claim');
+      }
+    }
+
+    return res.json({ success:true, membership: updatedMembership });
+  } catch (err) {
+    console.error('/redeem-claim error', err);
+    return res.status(500).json({ success:false, message:'Error interno' });
+  }
+});
     }
     const { claim, discordId } = req.body || {};
     if (!claim) return res.status(400).json({ success:false, message:'claim es requerido' });
@@ -599,39 +645,47 @@ async function expireMemberships() {
   try {
     console.log('⏱️ Chequeando memberships expiradas...');
     const nowIso = new Date().toISOString();
-    const { data: rows, error } = await supabase
-      .from('memberships')
-      .select('*')
-      .lte('expires_at', nowIso)
-      .eq('active', true)
-      .limit(1000);
-
+    const { data: rows, error } = await supabase.from('memberships').select('*').lte('expires_at', nowIso).eq('active', true).limit(1000);
     if (error) {
       console.error('Error buscando expiradas:', error);
       return;
     }
-    if (!rows || rows.length === 0) {
-      console.log('ℹ️ No expiradas en este ciclo.');
-      return;
-    }
+    if (!rows || rows.length === 0) { console.log('No expiradas en este ciclo.'); return; }
 
     for (const m of rows) {
       try {
+        console.log('Processing expired membership:', m.id || m.claim, 'email:', m.email);
         const roleId = getRoleIdForPlan(m.plan || m.plan_id);
+
+        // Attempt to remove role (log failures). We do NOT kick the user, only remove role.
         if (m.discord_id && roleId) {
-          try { await removeDiscordRole(m.discord_id, roleId); } catch(e) { console.error('removeDiscordRole error:', e); }
+          const removed = await removeDiscordRole(m.discord_id, roleId);
+          if (removed) {
+            console.log(`Role ${roleId} removed for membership ${m.id}`);
+            await markRoleRemovedInDB(m.id);
+          } else {
+            console.warn(`Could not remove role ${roleId} for membership ${m.id}`);
+          }
+        } else {
+          console.log('No discord_id or no roleId -> skip remove role');
         }
-        const updates = { active: false, revoked_at: new Date().toISOString() };
+
+        // Mark membership as revoked/inactive and save timestamp
+        const updates = { active: false, revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() };
         const { error: updErr } = await supabase.from('memberships').update(updates).eq('id', m.id);
-        if (updErr) console.error('Error marcando revocada:', updErr);
-        else console.log(`✅ Membership ${m.id || m.claim} marcada como revocada.`);
+        if (updErr) console.error('Error marking revoked', updErr);
+        else console.log(`Membership ${m.id} marked revoked.`);
+
+        // Send expiry / reactivation email (best-effort)
+        if (m.email) {
+          await sendExpiryEmail(m).catch(e => console.error('sendExpiryEmail error', e));
+        }
       } catch (innerErr) {
-        console.error('Error procesando membership expirada:', innerErr);
+        console.error('Error processing expired membership loop', innerErr);
       }
     }
-
   } catch (err) {
-    console.error('❌ Error en expireMemberships:', err);
+    console.error('❌ Error in expireMemberships', err);
   }
 }
 setTimeout(() => {
