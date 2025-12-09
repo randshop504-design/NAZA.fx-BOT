@@ -146,49 +146,6 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
 }
 
 // ============================================
-// == AGREGADO: Plantilla + función para RE-INVITACIÓN AUTOMÁTICA al expirar
-// ============================================
-function buildReinviteEmailHtml({ name, siteUrl, supportEmail }) {
-  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="color-scheme" content="dark light"><meta name="supported-color-schemes" content="dark light"><style>@media (prefers-color-scheme: dark) { .wrap { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important; } }</style></head><body style="margin:0;padding:0;background-color:#000000;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;"><tr><td align="center" valign="top"><table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;"><tr><td style="padding:0 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);"><tr><td style="padding:28px 24px 8px 24px;text-align:center;"><div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a);"><img src="${logoPath}" alt="NAZA logo" width="96" height="96" style="display:block;width:96px;height:96px;object-fit:cover;transform:scale(1.12);border-radius:50%;" /></div><h1 style="color:#ff9b3b;margin:18px 0 8px 0;font-size:26px;font-family:Arial,sans-serif;">Te extrañamos — NAZA Trading Academy</h1><div style="color:#cbd5e1;margin:6px 0 20px 0;font-size:16px;font-family:Arial,sans-serif;">Tus privilegios han expirado, pero la puerta está abierta para volver.</div></td></tr><tr><td style="padding:20px 28px 28px 28px;color:#d6e6f8;font-family:Arial,sans-serif;line-height:1.5;"><div style="font-size:15px;margin-bottom:12px;"><strong>Hola ${escapeHtml(name || 'amigo')},</strong></div><div style="font-size:15px;color:#d6e6f8;margin-bottom:12px;">Lamentablemente tus privilegios de acceso a los canales exclusivos y materiales de NAZA Trading Academy han finalizado. Queremos invitarte a volver: si te interesa retomar el aprendizaje y recuperar acceso, puedes comprar nuevamente y en minutos tendrás todo listo.</div><div style="text-align:center;margin:22px 0;"><a href="${siteUrl}" style="display:inline-block;background:#2d9bf0;color:#ffffff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(45,155,240,0.15);font-family:Arial,sans-serif;">Volver a comprar / Reactivar</a><div style="color:#9fb0c9;font-size:13px;margin-top:8px;font-family:Arial,sans-serif;">Haz clic para visitar nuestra página y seleccionar el plan que prefieras.</div></div><div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:16px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:8px;"><p style="margin:0 0 8px 0;"><strong>¿Necesitas ayuda?</strong></p><p style="margin:0;color:#d6e6f8">Si tienes dudas sobre tu cuenta o formas de pago, contáctanos y te ayudamos a reactivar el acceso.</p><a href="mailto:${supportEmail || SUPPORT_EMAIL}" style="display:inline-block;margin-top:12px;padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);text-decoration:none;color:#d6e6f8;font-weight:600;background:transparent;font-family:Arial,sans-serif;">Contactar soporte</a></div><div style="font-size:13px;color:#9fb0c9;margin-top:14px;font-family:Arial,sans-serif;"><div><strong>Resumen:</strong></div><div style="margin-top:6px;">Estado: Privilegios finalizados</div><div style="margin-top:6px;">Visita: <a href="${siteUrl}" target="_blank" style="color:#bfe0ff;text-decoration:none">${siteUrl}</a></div></div></td></tr><tr><td style="padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;"><div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: <a href="mailto:${supportEmail || SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${supportEmail || SUPPORT_EMAIL}</a></div></td></tr></table></td></tr></table></td></tr></table></body></html>`;
-}
-
-function buildReinviteText({ name, siteUrl, supportEmail }) {
-  return `Hola ${name || 'amigo'},\n\nTe escribimos para informarte que tus privilegios de acceso a NAZA Trading Academy han finalizado.\n\nSi quieres volver a acceder a los cursos, canales y contenido exclusivo, te invitamos a visitar:\n${siteUrl}\n\nSi necesitas ayuda para reactivar tu cuenta o tienes dudas sobre métodos de pago, contáctanos: ${supportEmail || SUPPORT_EMAIL}\n\n¡Te esperamos de nuevo!\n— NAZA Trading Academy`;
-}
-
-async function sendReinviteEmail(email, name, extra = {}) {
-  if (!SENDGRID_API_KEY) {
-    console.error('❌ No hay SENDGRID_API_KEY configurada. Abortando envío de re-invitación.');
-    throw new Error('SENDGRID_API_KEY no configurada');
-  }
-
-  const siteUrl = extra.siteUrl || (FRONTEND_URL ? FRONTEND_URL : 'https://www.nazatradingacademy.com');
-  const supportEmail = SUPPORT_EMAIL || extra.supportEmail || 'support@nazatradingacademy.com';
-
-  const html = buildReinviteEmailHtml({ name, siteUrl, supportEmail });
-  const text = buildReinviteText({ name, siteUrl, supportEmail });
-
-  const msg = {
-    to: email,
-    from: FROM_EMAIL,
-    subject: `Te extrañamos — Reactiva tu acceso en NAZA Trading Academy`,
-    text,
-    html
-  };
-
-  try {
-    const result = await sgMail.send(msg);
-    console.log('✅ Re-invite email enviado a:', email, 'status:', result?.[0]?.statusCode || 'unknown');
-    return true;
-  } catch (err) {
-    console.error('❌ Error enviando re-invite email:', err?.message || err);
-    if (err?.response?.body) console.error('SendGrid response body:', err.response.body);
-    throw err;
-  }
-}
-
-// ============================================
 // FUNCIONES PARA ASIGNAR / QUITAR ROLES (API REST + fallback discord.js)
 // Añadimos logging más claro para depuración.
 async function addRoleToMemberViaApi(discordId, roleId) {
@@ -250,7 +207,7 @@ async function removeRoleFromMemberViaApi(discordId, roleId) {
     try { body = await resp.text(); } catch(e) {}
     console.log(`DEBUG removeRoleViaApi -> status: ${status}, body: ${String(body).substring(0,400)}`);
     if (resp && resp.status === 204) {
-      console.log(`✅ Rol ${roleId} removido vía API de ${discordId}`);
+      console.log(`✅ Rol ${roleId} removido via API de ${discordId}`);
       return true;
     } else {
       console.warn(`⚠️ API removeRole responded ${status}: ${body}`);
@@ -361,7 +318,7 @@ app.post('/create-membership', async (req, res) => {
     const body = req.body || {};
     const name = (body.nombre || body.name || '').toString().trim();
     const email = (body.email || '').toString().trim().toLowerCase();
-    const plan = (body.plan || '').toString().trim().toLowerCase();
+    const plan = (body.plan || '').toString().trim();
     const discordId = body.discordId || body.discord_id || null;
 
     if (!name || !email || !plan) {
@@ -442,9 +399,6 @@ app.post('/create-membership', async (req, res) => {
 });
 
 // ENDPOINT: POST /redeem-claim
-// Este endpoint consume el claim (marca used=true y redeemed_at) y si recibe discordId lo asigna.
-// Nota: si querés "forzar" la adición al servidor sin OAuth, no es posible sin el access_token del usuario.
-// El flujo correcto es: el usuario hace OAuth (vía /api/auth/claim) y en el callback usamos el access_token.
 app.post('/redeem-claim', async (req, res) => {
   try {
     if (!validatePasswordFromBody(req)) {
@@ -453,7 +407,7 @@ app.post('/redeem-claim', async (req, res) => {
     const { claim, discordId } = req.body || {};
     if (!claim) return res.status(400).json({ success:false, message:'claim es requerido' });
 
-    // Buscamos la membership existente (aseguramos que used === false y active === true)
+    // 1) buscamos la membership por claim
     const { data: rows, error: fetchErr } = await supabase.from('memberships').select('*').eq('claim', claim).limit(1);
     if (fetchErr) {
       console.error('Error consultando membership por claim:', fetchErr);
@@ -462,12 +416,18 @@ app.post('/redeem-claim', async (req, res) => {
     if (!rows || rows.length === 0) return res.status(404).json({ success:false, message:'Claim no encontrado' });
     const membership = rows[0];
 
-    // Reject if already used or inactive
-    if (membership.used === true || membership.active === false) {
-      return res.status(400).json({ success:false, message:'Este claim ya fue usado o la membership no está activa' });
+    // 2) Validaciones estrictas: si ya fue usado, revocado o ya tiene discord_id => no puede usarse jamás
+    if (membership.used === true) {
+      return res.status(400).json({ success:false, message:'Este claim ya fue usado anteriormente y no puede reutilizarse.' });
+    }
+    if (membership.revoked_at) {
+      return res.status(400).json({ success:false, message:'Este claim ha sido revocado y no puede utilizarse.' });
+    }
+    if (membership.discord_id) {
+      return res.status(400).json({ success:false, message:'Este claim ya está vinculado a un Discord ID y no puede utilizarse.' });
     }
 
-    // Hacemos un UPDATE condicional para prevenir race conditions (solo actualizamos si used === false)
+    // 3) Hacemos un UPDATE condicional/atómico: sólo actualiza si sigue sin usarse y sin discord_id
     const updates = {
       used: true,
       active: false,
@@ -479,7 +439,9 @@ app.post('/redeem-claim', async (req, res) => {
       .from('memberships')
       .update(updates)
       .eq('claim', claim)
-      .eq('used', false)
+      .eq('used', false)          // sólo si no está marcado como usado aún
+      .is('discord_id', null)     // sólo si no tiene discord_id vinculado
+      .is('revoked_at', null)     // sólo si no está revocado
       .select()
       .limit(1);
 
@@ -488,23 +450,25 @@ app.post('/redeem-claim', async (req, res) => {
       return res.status(500).json({ success:false, message:'Error interno' });
     }
 
-    // Si no se obtuvo fila actualizada, fue porque alguien más la reclamó simultáneamente
+    // Si no se actualizó ninguna fila, significa que alguien ya la usó/revocó/o vinculó antes (race / estado cambiado)
     if (!updateData || (Array.isArray(updateData) && updateData.length === 0)) {
-      return res.status(400).json({ success:false, message:'Este claim ya fue utilizado (concurrency) o no está disponible' });
+      return res.status(400).json({ success:false, message:'No se pudo canjear el claim. Es posible que ya se haya usado o revocado.' });
     }
 
-    // Asignar rol si discordId fue pasado
-    const finalDiscordId = discordId || membership.discord_id;
+    const updatedMembership = Array.isArray(updateData) ? updateData[0] : updateData;
+
+    // 4) Asignar rol si discordId fue pasado (o si la fila tenía discord_id) -> preferir el discordId recibido
+    const finalDiscordId = discordId || updatedMembership.discord_id;
     if (finalDiscordId) {
-      const roleId = getRoleIdForPlan(membership.plan || membership.plan_id);
+      const roleId = getRoleIdForPlan(updatedMembership.plan || updatedMembership.plan_id);
       if (roleId) {
         await assignDiscordRole(finalDiscordId, roleId).catch(err => console.error('assignDiscordRole error:', err));
       } else {
-        console.warn('No se encontró roleId para plan:', membership.plan || membership.plan_id);
+        console.warn('No se encontró roleId para plan:', updatedMembership.plan || updatedMembership.plan_id);
       }
     }
 
-    return res.json({ success:true, membership: (Array.isArray(updateData) ? updateData[0] : updateData) || membership });
+    return res.json({ success:true, membership: updatedMembership });
   } catch (err) {
     console.error('❌ Error en /redeem-claim:', err);
     return res.status(500).json({ success:false, message:'Error interno' });
@@ -512,19 +476,18 @@ app.post('/redeem-claim', async (req, res) => {
 });
 
 // ============================================
-
 // RUTA: /api/auth/claim  -> redirige al OAuth de Discord (el link que mandamos por email)
-// ---- CAMBIO: ahora GENERA un state_token efímero en DB y REDIRIGE con state=state_token
 app.get('/api/auth/claim', async (req, res) => {
-  const claim = req.query.token || req.query.state;
-  if (!claim) return res.status(400).send('Token missing');
+  const token = req.query.token || req.query.state;
+  if (!token) return res.status(400).send('Token missing');
   try {
-    // Verificamos que exista y no esté usado
+    // Verificamos que exista y NO esté usado, revocado ni vinculado a discord_id
     const { data: rows, error } = await supabase
       .from('memberships')
-      .select('id,claim,used,active')
-      .eq('claim', claim)
+      .select('id,claim,used,revoked_at,discord_id')
+      .eq('claim', token)
       .limit(1);
+
     if (error) {
       console.error('Error leyendo claim:', error);
       return res.status(500).send('Error interno');
@@ -532,36 +495,24 @@ app.get('/api/auth/claim', async (req, res) => {
     if (!rows || rows.length === 0) {
       return res.status(400).send('Enlace inválido. Contacta soporte.');
     }
-    const membership = rows[0];
-    if (membership.used) {
+    const claimRow = rows[0];
+
+    if (claimRow.used === true) {
       return res.status(400).send('Este enlace ya fue utilizado.');
     }
-    if (membership.active === false) {
-      return res.status(400).send('Esta membership no está activa.');
+    if (claimRow.revoked_at) {
+      return res.status(400).send('Este enlace ha sido revocado.');
+    }
+    if (claimRow.discord_id) {
+      return res.status(400).send('Este enlace ya fue vinculado a una cuenta. Contacta soporte si crees que hay un error.');
     }
 
-    // GENERAR state_token único y guardarlo (efímero)
-    const stateToken = crypto.randomBytes(30).toString('hex');
-    const stateCreatedAt = new Date().toISOString();
-
-    const { data: upd, error: upErr } = await supabase
-      .from('memberships')
-      .update({ state_token: stateToken, state_created_at: stateCreatedAt })
-      .eq('id', membership.id)
-      .select()
-      .limit(1);
-
-    if (upErr) {
-      console.error('Error guardando state_token:', upErr);
-      return res.status(500).send('Error interno');
-    }
-
-    // Redirigir a OAuth2 de Discord usando state = stateToken
+    // Redirigir a OAuth2 de Discord usando token como state
     const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
     const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
     const scope = encodeURIComponent('identify guilds.join');
     const prompt = 'consent';
-    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${encodeURIComponent(stateToken)}&prompt=${prompt}`;
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${encodeURIComponent(token)}&prompt=${prompt}`;
     return res.redirect(discordAuthUrl);
   } catch (err) {
     console.error('❌ Error en /api/auth/claim:', err);
@@ -572,15 +523,11 @@ app.get('/api/auth/claim', async (req, res) => {
 // ============================================
 // CALLBACK DE DISCORD OAUTH2 -> /discord/callback
 // Intercambia code por token, obtiene user, agrega al guild usando el access_token y asigna rol.
-// MARK: ahora busca membership por state_token y lo consume de forma atómica.
+// Marca claim como used en DB luego de guardar membership.
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code || !state) return res.status(400).send('Faltan parámetros');
-
-    // Sanity checks: variables críticas
-    if (!DISCORD_BOT_TOKEN) console.error('❌ DISCORD_BOT_TOKEN no definido (env) — el bot no podrá asignar roles');
-    if (!GUILD_ID) console.error('❌ GUILD_ID no definido (env) — no se pueden realizar operaciones en el servidor');
 
     // 1) Intercambiar code por access_token
     const params = new URLSearchParams({
@@ -596,10 +543,9 @@ app.get('/discord/callback', async (req, res) => {
       body: params.toString()
     });
     const tokenData = await tokenResponse.json();
-    console.log('DEBUG oauth tokenData:', tokenData);
     if (!tokenData || !tokenData.access_token) {
       console.error('❌ Error obteniendo token:', tokenData);
-      return res.status(400).send('Error de autorización (token).');
+      return res.status(400).send('Error de autorización');
     }
 
     // 2) Obtener info del usuario
@@ -629,102 +575,92 @@ app.get('/discord/callback', async (req, res) => {
       let addText = '<no body>';
       try { addText = await addResp.text(); } catch(e) {}
       console.log(`DEBUG add-member via OAuth -> status: ${addStatus}, body: ${String(addText).substring(0,400)}`);
+      // Note: Discord retorna 201 or 204 on success o 204; si ya está en el servidor puede retornar 201/204
     } catch (err) {
       console.warn('⚠️ No se pudo añadir al usuario al guild via OAuth PUT:', err);
     }
 
-    // 4) Buscar membership por state_token (state) y VALIDAR
+    // ----------------------------------------
+    // 4) BUSCAR membership por claim = state y validar ESTADO (estricto)
     let membership = null;
     try {
-      const { data: rows, error } = await supabase.from('memberships').select('*').eq('state_token', state).limit(1);
-      if (error) console.error('Error buscando membership por state_token:', error);
-      if (rows && rows.length > 0) membership = rows[0];
+      const { data: rows, error } = await supabase
+        .from('memberships')
+        .select('*')
+        .eq('claim', state)
+        .limit(1);
+
+      if (error) {
+        console.error('Error buscando membership por claim en callback:', error);
+      } else if (rows && rows.length > 0) {
+        membership = rows[0];
+      }
     } catch (err) {
-      console.error('Error buscando membership por state_token en callback:', err);
+      console.error('Error buscando membership por claim en callback:', err);
     }
 
+    // Si la membership NO existe -> rechazamos (no crear una fila nueva automáticamente)
     if (!membership) {
-      console.warn('⚠️ No se encontró membership para state_token (state):', state);
+      console.warn('Callback OAuth: claim no existe en DB -> rechazar.');
       return res.status(400).send('Enlace inválido o expirado. Contacta soporte.');
     }
 
-    // Opcional: validar expiración del state_token (ejemplo 15 min)
-    if (membership.state_created_at) {
-      try {
-        const createdTs = new Date(membership.state_created_at).getTime();
-        const nowTs = Date.now();
-        const diffMinutes = (nowTs - createdTs) / (1000 * 60);
-        if (diffMinutes > 15) {
-          return res.status(400).send('El enlace expiró. Generá uno nuevo desde tu correo.');
-        }
-      } catch(e) {
-        // no bloquear si falla parseo
+    // Validaciones estrictas: si ya fue usado, revocado o ya tiene discord_id -> no se permite reutilizar
+    if (membership.used === true || membership.revoked_at || membership.discord_id) {
+      console.warn('Callback OAuth: claim inválido (ya usado/revocado/vinculado).');
+      return res.status(400).send('Este enlace ya fue utilizado o ha sido revocado. Contacta soporte si necesitas ayuda.');
+    }
+
+    // 5) Actualizamos la fila de membership de forma condicional (atómica): sólo si sigue sin usarse y sin discord_id
+    try {
+      const updates = {
+        discord_id: discordId,
+        discord_username: discordUsername,
+        used: true,
+        redeemed_at: new Date().toISOString(),
+        active: false
+      };
+
+      const { data: updatedRows, error: updErr } = await supabase
+        .from('memberships')
+        .update(updates)
+        .eq('claim', state)
+        .eq('used', false)
+        .is('discord_id', null)
+        .is('revoked_at', null)
+        .select()
+        .limit(1);
+
+      if (updErr) {
+        console.error('Error actualizando membership en callback:', updErr);
+      } else if (!updatedRows || updatedRows.length === 0) {
+        console.warn('Callback OAuth: la fila no pudo actualizarse (probablemente utilizada en paralelo).');
+        return res.status(400).send('Este enlace ya fue utilizado o no es válido. Contacta soporte.');
+      } else {
+        membership = updatedRows[0];
       }
+    } catch (err) {
+      console.error('Error guardando/actualizando membership en callback:', err);
     }
 
-    // 5) Consumir la membership de forma atómica: solo actualizar si used === false
-    const updates = {
-      discord_id: discordId,
-      discord_username: discordUsername,
-      used: true,
-      redeemed_at: new Date().toISOString(),
-      active: true,
-      state_token: null,
-      state_created_at: null
-    };
-
-    const { data: updatedRows, error: updateErr } = await supabase
-      .from('memberships')
-      .update(updates)
-      .eq('id', membership.id)
-      .eq('used', false)           // condicional importante para evitar race
-      .select()
-      .limit(1);
-
-    if (updateErr) {
-      console.error('Error marcando membership como usada:', updateErr);
-      return res.status(500).send('Error interno');
-    }
-
-    if (!updatedRows || updatedRows.length === 0) {
-      // Alguien más reclamó justo ahora
-      return res.status(400).send('Este enlace ya fue reclamado por otra persona.');
-    }
-
-    // 6) Asignar rol al usuario (mejor logging y retrys)
-    const finalMembership = updatedRows[0];
-    const planOfUser = finalMembership ? (finalMembership.plan || finalMembership.plan_id || 'plan_mensual') : 'plan_mensual';
+    // 6) Asignar rol al usuario
+    const planOfUser = membership ? (membership.plan || membership.plan_id) : 'plan_mensual';
     const roleId = getRoleIdForPlan(planOfUser);
-
-    if (!roleId) {
-      console.error('❌ No se determinó roleId para plan:', planOfUser);
-      console.error('Verifica que las variables de entorno ROLE_ID_ANUALDISCORD / ROLE_ID_MENTORIADISCORD / ROLE_ID_SENALESDISCORD estén definidas.');
+    if (roleId) {
+      const ok = await assignDiscordRole(discordId, roleId).catch(err => { console.error('assignDiscordRole error in callback:', err); return false; });
+      if (!ok) console.warn('⚠️ assignDiscordRole devolvió false — revisá permisos o jerarquía del bot.');
     } else {
-      try {
-        // Intentos con backoff simple
-        let assigned = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          console.log(`Intentando asignar rol (attempt ${attempt}) -> roleId=${roleId} discordId=${discordId}`);
-          const ok = await assignDiscordRole(discordId, roleId);
-          if (ok) { assigned = true; break; }
-          await new Promise(r => setTimeout(r, 500 * attempt));
-        }
-        if (!assigned) console.error('❌ No se pudo asignar el rol después de varios intentos. Revisa permisos y jerarquía del bot.');
-        else console.log('✅ Rol asignado correctamente.');
-      } catch (err) {
-        console.error('❌ assignDiscordRole error in callback:', err);
-      }
+      console.warn('No se encontró roleId para plan:', planOfUser);
     }
 
-    // 7) Redirigir a success (mostrar aviso si rol no se pudo asignar)
+    // 7) Redirigir a success
     const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg';
-    const msg = roleId ? 'Tu rol ha sido asignado correctamente (si el bot tiene permisos).' : 'Tu cuenta fue autorizada, pero no pudimos asignar el rol automáticamente. Contacta soporte.';
     return res.send(`
 <!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
 <body style="font-family:Arial,Helvetica,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
   <div style="background:rgba(255,255,255,0.04);padding:32px;border-radius:12px;text-align:center;">
     <h1>🎉 ¡Bienvenido!</h1>
-    <p>${msg} Serás redirigido en unos segundos...</p>
+    <p>Tu rol ha sido asignado correctamente (si el bot tiene permisos). Serás redirigido en unos segundos...</p>
     <a href="${successRedirect}" style="display:inline-block;margin-top:12px;padding:12px 20px;border-radius:8px;background:#fff;color:#111;text-decoration:none;font-weight:bold;">Ir a Discord</a>
   </div>
   <script>setTimeout(()=>{ window.location.href='${successRedirect}' }, 3000);</script>
@@ -775,22 +711,8 @@ async function expireMemberships() {
         // 2) Marcar membership como revocada en la DB
         const updates = { active: false, revoked_at: new Date().toISOString() };
         const { error: updErr } = await supabase.from('memberships').update(updates).eq('id', m.id);
-        if (updErr) {
-          console.error('Error marcando revocada:', updErr);
-        } else {
-          console.log(`✅ Membership ${m.id || m.claim} marcada como revocada.`);
-
-          // 3) ENVIAR EMAIL DE RE-INVITACIÓN AUTOMÁTICA
-          try {
-            if (m.email) {
-              await sendReinviteEmail(m.email, m.name, { siteUrl: FRONTEND_URL || 'https://www.nazatradingacademy.com' });
-            } else {
-              console.log('ℹ️ Membership sin email — no se envió re-invitación.');
-            }
-          } catch (emailErr) {
-            console.error('❌ Error enviando email de re-invitación:', emailErr);
-          }
-        }
+        if (updErr) console.error('Error marcando revocada:', updErr);
+        else console.log(`✅ Membership ${m.id || m.claim} marcada como revocada.`);
       } catch (innerErr) {
         console.error('Error procesando membership expirada:', innerErr);
       }
@@ -833,27 +755,6 @@ async function verifyBotTokenAtStartup() {
   }
 }
 verifyBotTokenAtStartup();
-
-// ============================================
-// DEBUG: endpoint para chequear variables de entorno críticas (protegido por API_PASSWORD)
-app.get('/debug-env', (req, res) => {
-  const pass = req.query.password || req.headers['x-api-password'] || '';
-  if (pass !== API_PASSWORD) return res.status(401).json({ ok:false, message:'password inválida' });
-  const envs = {
-    DISCORD_BOT_TOKEN: !!DISCORD_BOT_TOKEN,
-    DISCORD_CLIENT_ID: !!DISCORD_CLIENT_ID,
-    DISCORD_CLIENT_SECRET: !!DISCORD_CLIENT_SECRET,
-    DISCORD_REDIRECT_URL: !!DISCORD_REDIRECT_URL,
-    GUILD_ID: !!GUILD_ID,
-    ROLE_ID_ANUAL: !!(process.env.ROLE_ID_ANUAL || process.env.ROLE_ID_ANUALDISCORD),
-    ROLE_ID_MENSUAL: !!(process.env.ROLE_ID_MENSUAL || process.env.ROLE_ID_SENALESDISCORD),
-    ROLE_ID_TRIMESTRAL: !!(process.env.ROLE_ID_TRIMESTRAL || process.env.ROLE_ID_MENTORIADISCORD),
-    SENDGRID_API_KEY: !!SENDGRID_API_KEY,
-    FROM_EMAIL: !!FROM_EMAIL,
-    FRONTEND_URL: !!FRONTEND_URL
-  };
-  return res.json({ ok:true, envs });
-});
 
 // ============================================
 // HEALTH
