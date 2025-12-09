@@ -712,7 +712,8 @@ async function expireMemberships() {
 }
 setTimeout(() => {
   expireMemberships().catch(err => console.error('expireMemberships startup error:', err));
-  setInterval(() => expireMemberships().catch(err => console.error('expireMemberships interval error:', err)), 60*60*1000);
+  // === CAMBIO REALIZADO: ejecutar expireMemberships cada 60 segundos (1 minuto)
+  setInterval(() => expireMemberships().catch(err => console.error('expireMemberships interval error:', err)), 60*1000);
 }, 3000);
 
 // ============================================
