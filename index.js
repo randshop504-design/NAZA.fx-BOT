@@ -457,6 +457,29 @@ app.post('/redeem-claim', async (req, res) => {
 
     const updatedMembership = Array.isArray(updateData) ? updateData[0] : updateData;
 
+    // SECURITY CHECK: re-fetch para confirmar que el claim quedó con used=true y discord_id correcto
+    try {
+      const { data: confirmRows, error: confirmErr } = await supabase.from('memberships').select('*').eq('claim', claim).limit(1);
+      if (confirmErr) {
+        console.warn('No se pudo confirmar estado de membership tras update:', confirmErr);
+      } else if (!confirmRows || confirmRows.length === 0) {
+        console.warn('Membership desapareció tras update (inusual).');
+      } else {
+        const confirm = confirmRows[0];
+        if (confirm.used !== true) {
+          console.error('ALERTA: confirm.used !== true tras update. confirm:', confirm);
+          return res.status(500).json({ success:false, message:'Error interno: fallo de consistencia (used no quedó marcado).' });
+        }
+        // Si se pasó discordId y confirm.discord_id existe y es distinto -> fallo
+        if (discordId && confirm.discord_id && String(confirm.discord_id) !== String(discordId)) {
+          console.error('ALERTA: discord_id no coincide tras update. confirm:', confirm.discord_id, 'expected:', discordId);
+          return res.status(400).json({ success:false, message:'Este claim ya fue canjeado por otro usuario.' });
+        }
+      }
+    } catch (err) {
+      console.warn('Excepción confirmando membership:', err);
+    }
+
     // 4) Asignar rol si discordId fue pasado (o si la fila tenía discord_id) -> preferir el discordId recibido
     const finalDiscordId = discordId || updatedMembership.discord_id;
     if (finalDiscordId) {
@@ -584,17 +607,8 @@ app.get('/discord/callback', async (req, res) => {
     // 4) BUSCAR membership por claim = state y validar ESTADO (estricto)
     let membership = null;
     try {
-      const { data: rows, error } = await supabase
-        .from('memberships')
-        .select('*')
-        .eq('claim', state)
-        .limit(1);
-
-      if (error) {
-        console.error('Error buscando membership por claim en callback:', error);
-      } else if (rows && rows.length > 0) {
-        membership = rows[0];
-      }
+      const { data: rows } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
+      if (rows && rows.length > 0) membership = rows[0];
     } catch (err) {
       console.error('Error buscando membership por claim en callback:', err);
     }
@@ -641,6 +655,20 @@ app.get('/discord/callback', async (req, res) => {
       }
     } catch (err) {
       console.error('Error guardando/actualizando membership en callback:', err);
+    }
+
+    // SECURITY CHECK: confirmar estado final
+    try {
+      const { data: finalRows } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
+      if (finalRows && finalRows.length > 0) {
+        const final = finalRows[0];
+        if (!final.used || final.discord_id !== String(discordId)) {
+          console.error('ALERTA: inconsistencia tras la actualización en callback:', final);
+          return res.status(500).send('Error interno procesando el canje. Contacta soporte.');
+        }
+      }
+    } catch (e) {
+      console.warn('No se pudo confirmar estado final tras callback:', e);
     }
 
     // 6) Asignar rol al usuario
