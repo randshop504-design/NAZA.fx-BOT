@@ -6,7 +6,7 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const sgMail = require('@sendgrid/mail');
 const crypto = require('crypto');
-const fetch = global.fetch || (() => { try { return require('node-fetch'); } catch(e){ return null; } })();
+const fetch = global.fetch || (() => { try { return require('node-fetch'); } catch (e) { return null; } })();
 
 const app = express();
 app.use(express.json());
@@ -28,7 +28,8 @@ const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD || process.env.ROL
 const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL || '';
 const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_MENSUAL || '';
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
-// <-- se pidió explícitamente usar literal exacto: Alex13102001$$$
+
+// Literal default password the user insisted on
 const API_PASSWORD = process.env.API_PASSWORD || 'Alex13102001$$$';
 
 // Configure SendGrid
@@ -62,15 +63,24 @@ discordClient.once('ready', () => {
 // Utilities
 function escapeHtml(str) {
   if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\'/g,'&#39;');
-}
-function validatePasswordFromBody(req) {
-  const sent = (req.body && req.body.password) ? String(req.body.password) : '';
-  if (!sent) return false;
-  return sent === API_PASSWORD;
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-// ================= Email templates (bienvenida + expiración)
+// Validate password: accept body.password OR header x-admin-key (exact literal)
+function validatePasswordFromBody(req) {
+  try {
+    const sentBody = (req.body && req.body.password) ? String(req.body.password) : '';
+    const sentHeader = req.headers && (req.headers['x-admin-key'] || req.headers['x-admin_key'] || req.headers['x-adminkey']) ? String(req.headers['x-admin-key'] || req.headers['x-admin_key'] || req.headers['x-adminkey']) : '';
+    if (sentBody && sentBody === API_PASSWORD) return true;
+    if (sentHeader && sentHeader === API_PASSWORD) return true;
+    return false;
+  } catch (err) {
+    console.warn('validatePasswordFromBody exception', err);
+    return false;
+  }
+}
+
+// ================= Email templates (usé el cuerpo que pediste)
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
   const logoPath = process.env.LOGO_URL || '';
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"/></head><body style="background:#000;color:#fff;font-family:Arial,sans-serif;padding:24px;">
@@ -163,12 +173,10 @@ async function removeRoleFromMemberViaApi(discordId, roleId) {
 
 async function assignDiscordRole(discordId, roleId) {
   if (!discordId || !roleId) return false;
-  // 1) try API
   try {
     const okApi = await addRoleToMemberViaApi(discordId, roleId);
     if (okApi) return true;
-  } catch(e) { console.warn('assignDiscordRole api err', e); }
-  // 2) fallback discord.js
+  } catch (e) { console.warn('assignDiscordRole api err', e); }
   try {
     const guild = await discordClient.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(discordId);
@@ -180,25 +188,17 @@ async function assignDiscordRole(discordId, roleId) {
   }
 }
 
-/* robust removeDiscordRole: API -> discord.js fallback -> checks jerarquía y devuelve true/false */
 async function removeDiscordRole(discordId, roleId) {
   if (!discordId || !roleId) return false;
-  // API attempt
   try {
     const okApi = await removeRoleFromMemberViaApi(discordId, roleId);
     if (okApi) return true;
   } catch (e) { console.warn('removeDiscordRole api attempt err', e); }
-  // Fallback: discord.js
   try {
     const guild = await discordClient.guilds.fetch(GUILD_ID);
     if (!guild) return false;
-    // fetch member (if not in guild, cannot remove)
     let member;
     try { member = await guild.members.fetch(discordId); } catch (fetchErr) { console.warn('No member to fetch (maybe left) ', fetchErr?.message || fetchErr); return false; }
-    // log roles
-    const memberRoles = member.roles.cache.map(r => ({ id: r.id, name: r.name, position: r.position }));
-    console.log('DEBUG member.roles count', memberRoles.length);
-    // bot roles
     const botMember = await guild.members.fetch(discordClient.user?.id);
     const botMaxPos = Math.max(...botMember.roles.cache.map(r => r.position), 0);
     const targetRole = guild.roles.cache.get(roleId);
@@ -207,7 +207,6 @@ async function removeDiscordRole(discordId, roleId) {
       console.error('Bot hierarchy insufficient to remove role (botMaxPos <= targetPos)');
       return false;
     }
-    // try remove
     try {
       await member.roles.remove(roleId);
       return true;
@@ -221,7 +220,6 @@ async function removeDiscordRole(discordId, roleId) {
   }
 }
 
-// Helper: update DB to mark role_removed (so we don't try repeatedly)
 async function markRoleRemovedInDB(id) {
   try {
     const { error } = await supabase.from('memberships').update({ role_removed: true, updated_at: new Date().toISOString() }).eq('id', id);
@@ -382,7 +380,7 @@ app.get('/api/auth/claim', async (req, res) => {
   }
 });
 
-// DISCORD OAUTH CALLBACK (robusto: early-check -> token exchange -> user fetch -> mark used -> assign role)
+// DISCORD OAUTH CALLBACK
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -408,7 +406,7 @@ app.get('/discord/callback', async (req, res) => {
       console.warn('Error verificando claim antes de token exchange:', err);
     }
 
-    // Token exchange (single attempt, explicit handling)
+    // Token exchange
     let tokenData = null;
     try {
       const params = new URLSearchParams({
