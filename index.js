@@ -282,6 +282,9 @@ function calculateExpiryDate(plan) {
 }
 
 function getRoleIdForPlan(planId) {
+  // Normalizar entrada para evitar problemas de mayúsculas, espacios, etc.
+  const p = (planId || '').toString().toLowerCase().trim();
+
   const mapping = {
     'plan_mensual': ROLE_ID_SENALESDISCORD,
     'mensual': ROLE_ID_SENALESDISCORD,
@@ -290,11 +293,13 @@ function getRoleIdForPlan(planId) {
     'plan_anual': ROLE_ID_ANUALDISCORD,
     'anual': ROLE_ID_ANUALDISCORD
   };
-  const roleId = mapping[planId];
-  if (roleId && roleId.trim() !== '') return roleId;
-  if (ROLE_ID_SENALESDISCORD) return ROLE_ID_SENALESDISCORD;
-  if (ROLE_ID_MENTORIADISCORD) return ROLE_ID_MENTORIADISCORD;
-  if (ROLE_ID_ANUALDISCORD) return ROLE_ID_ANUALDISCORD;
+
+  const roleId = mapping[p];
+
+  // Si existe y no está vacío, devolverlo. Si no, NO hacer fallback a otro role.
+  if (roleId && String(roleId).trim() !== '') return roleId;
+
+  console.warn(`getRoleIdForPlan: no se encontró role para plan="${planId}" (normalizado="${p}").`);
   return null;
 }
 
