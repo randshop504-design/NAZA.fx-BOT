@@ -645,9 +645,58 @@ async function expireMemberships() {
     for (const m of rows) {
       try {
         const roleId = getRoleIdForPlan(m.plan || m.plan_id);
+
+        // 1) Si tenemos discord_id y roleId, intentar remover el rol
         if (m.discord_id && roleId) {
-          await removeDiscordRole(m.discord_id, roleId).catch(err => console.error('removeDiscordRole error:', err));
+          try {
+            await removeDiscordRole(m.discord_id, roleId);
+          } catch (err) {
+            console.error('removeDiscordRole error:', err);
+          }
         }
+
+        // 2) Intentar expulsar (kick) al usuario del guild si discord_id está presente
+        if (m.discord_id) {
+          try {
+            // Intento con discord.js (mejor opción porque respetará jerarquía/errores claros)
+            const guild = await discordClient.guilds.fetch(GUILD_ID);
+            // fetch member may throw if not in guild
+            try {
+              const member = await guild.members.fetch(m.discord_id);
+              // Kick the member with a reason
+              await member.kick('Membership expired');
+              console.log(`✅ Usuario ${m.discord_id} expulsado del servidor (kick).`);
+            } catch (fetchMemberErr) {
+              // If member fetch failed (user not in guild) we'll try the REST delete to ensure removal
+              console.warn('⚠️ No se pudo fetchear el miembro con discord.js o no está en el servidor:', fetchMemberErr);
+              try {
+                const url = `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${m.discord_id}`;
+                const resp = await fetch(url, {
+                  method: 'DELETE',
+                  headers: {
+                    Authorization: `Bot ${DISCORD_BOT_TOKEN}`
+                  }
+                });
+                const status = resp ? resp.status : 'no-response';
+                let body = '<no-body>';
+                try { body = await resp.text(); } catch(e) {}
+                if (resp && (resp.status === 204 || resp.status === 200)) {
+                  console.log(`✅ Usuario ${m.discord_id} eliminado vía API (DELETE).`);
+                } else {
+                  console.warn(`⚠️ Intento de eliminar usuario vía API devolvió ${status}: ${String(body).substring(0,400)}`);
+                }
+              } catch (apiErr) {
+                console.error('❌ Error intentando eliminar usuario vía API:', apiErr);
+              }
+            }
+          } catch (kickErr) {
+            console.error('❌ Error intentando expulsar (kick) al usuario:', kickErr);
+          }
+        } else {
+          console.log('ℹ️ Membership sin discord_id — solo se marcará como revocada en DB.');
+        }
+
+        // 3) Marcar membership como revocada en la DB
         const updates = { active: false, revoked_at: new Date().toISOString() };
         const { error: updErr } = await supabase.from('memberships').update(updates).eq('id', m.id);
         if (updErr) console.error('Error marcando revocada:', updErr);
