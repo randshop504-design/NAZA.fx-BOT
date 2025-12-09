@@ -361,7 +361,7 @@ app.post('/create-membership', async (req, res) => {
     const body = req.body || {};
     const name = (body.nombre || body.name || '').toString().trim();
     const email = (body.email || '').toString().trim().toLowerCase();
-    const plan = (body.plan || '').toString().trim();
+    const plan = (body.plan || '').toString().trim().toLowerCase();
     const discordId = body.discordId || body.discord_id || null;
 
     if (!name || !email || !plan) {
@@ -791,6 +791,27 @@ async function verifyBotTokenAtStartup() {
   }
 }
 verifyBotTokenAtStartup();
+
+// ============================================
+// DEBUG: endpoint para chequear variables de entorno críticas (protegido por API_PASSWORD)
+app.get('/debug-env', (req, res) => {
+  const pass = req.query.password || req.headers['x-api-password'] || '';
+  if (pass !== API_PASSWORD) return res.status(401).json({ ok:false, message:'password inválida' });
+  const envs = {
+    DISCORD_BOT_TOKEN: !!DISCORD_BOT_TOKEN,
+    DISCORD_CLIENT_ID: !!DISCORD_CLIENT_ID,
+    DISCORD_CLIENT_SECRET: !!DISCORD_CLIENT_SECRET,
+    DISCORD_REDIRECT_URL: !!DISCORD_REDIRECT_URL,
+    GUILD_ID: !!GUILD_ID,
+    ROLE_ID_ANUAL: !!(process.env.ROLE_ID_ANUAL || process.env.ROLE_ID_ANUALDISCORD),
+    ROLE_ID_MENSUAL: !!(process.env.ROLE_ID_MENSUAL || process.env.ROLE_ID_SENALESDISCORD),
+    ROLE_ID_TRIMESTRAL: !!(process.env.ROLE_ID_TRIMESTRAL || process.env.ROLE_ID_MENTORIADISCORD),
+    SENDGRID_API_KEY: !!SENDGRID_API_KEY,
+    FROM_EMAIL: !!FROM_EMAIL,
+    FRONTEND_URL: !!FRONTEND_URL
+  };
+  return res.json({ ok:true, envs });
+});
 
 // ============================================
 // HEALTH
