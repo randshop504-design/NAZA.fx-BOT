@@ -592,6 +592,68 @@ app.get('/api/auth/claim', async (req, res) => {
 });
 
 // ============================================
+// FUNCION ROBUSTA PARA EXCHANGE (con retries y manejo 429)
+async function exchangeTokenWithRetry(code, maxRetries = 4) {
+  const paramsBase = {
+    client_id: DISCORD_CLIENT_ID,
+    client_secret: DISCORD_CLIENT_SECRET,
+    grant_type: 'authorization_code',
+    code: code,
+    redirect_uri: DISCORD_REDIRECT_URL
+  };
+
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    attempt++;
+    try {
+      const params = new URLSearchParams(paramsBase);
+      const tokenResp = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+
+      const status = tokenResp.status;
+      const bodyText = await tokenResp.text();
+
+      console.log(`DEBUG token exchange attempt=${attempt} status=${status}`);
+
+      // Si rate-limited -> respetar Retry-After si viene o backoff exponencial
+      if (status === 429) {
+        let retryAfterHeader = null;
+        try { retryAfterHeader = tokenResp.headers.get && tokenResp.headers.get('retry-after'); } catch(e){}
+        const waitSec = retryAfterHeader ? Number(retryAfterHeader) : Math.min(5 * attempt, 60);
+        console.warn(`Token exchange 429 recibido. Esperando ${waitSec}s antes de retry (attempt ${attempt})`);
+        await new Promise(r => setTimeout(r, waitSec * 1000));
+        continue; // retry
+      }
+
+      // Intentar parsear JSON y devolver
+      try {
+        const parsed = JSON.parse(bodyText);
+        if (!parsed || !parsed.access_token) {
+          console.error('Token exchange devolvió JSON pero sin access_token:', parsed);
+          return { error: true, status, bodyText, parsed };
+        }
+        return { error: false, status, data: parsed };
+      } catch (parseErr) {
+        // body no es JSON
+        console.error('Token exchange devolvió body no-JSON. status:', status, 'body starts with:', (bodyText||'').substring(0,200));
+        return { error: true, status, bodyText };
+      }
+    } catch (err) {
+      console.error('Excepción durante token exchange (fetch):', err);
+      // esperar un poco antes de retry
+      const waitMs = Math.min(1000 * Math.pow(2, attempt), 30000);
+      await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+  }
+
+  return { error: true, status: 429, message: 'Máximo reintentos alcanzado en token exchange (429/timeout).' };
+}
+
+// ============================================
 // CALLBACK DE DISCORD OAUTH2 -> /discord/callback
 app.get('/discord/callback', async (req, res) => {
   try {
@@ -601,50 +663,29 @@ app.get('/discord/callback', async (req, res) => {
       return res.status(400).send('Faltan parámetros (code o state).');
     }
 
-    // --- 1) Intercambio code -> token ---
+    // --- 1) Intercambio code -> token usando la función robusta ---
     let tokenData = null;
     try {
-      const params = new URLSearchParams({
-        client_id: DISCORD_CLIENT_ID,
-        client_secret: DISCORD_CLIENT_SECRET,
-        grant_type: 'authorization_code',
-        code: code,
-        redirect_uri: DISCORD_REDIRECT_URL
-      });
-
-      const tokenResp = await fetch('https://discord.com/api/oauth2/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString()
-      });
-
-      const tokenStatus = tokenResp.status;
-      const tokenText = await tokenResp.text();
-      console.log('DEBUG token exchange -> status:', tokenStatus, 'raw body (truncated):', tokenText?.substring(0,1000));
-
-      try {
-        tokenData = JSON.parse(tokenText);
-      } catch (parseErr) {
-        console.error('Token exchange devolvió body no-JSON. status:', tokenStatus, 'body starts with:', (tokenText||'').substring(0,120));
+      const tokenResult = await exchangeTokenWithRetry(code, 4);
+      if (tokenResult.error) {
+        console.error('Fallo token exchange tras retries:', tokenResult);
+        const statusForUser = tokenResult.status || 500;
+        const bodyForUser = tokenResult.bodyText || (tokenResult.message || 'Error al intercambiar token.');
         return res.status(400).send(`
           <h2>Error de autorización (token exchange)</h2>
           <p>Discord devolvió una respuesta inesperada al intercambiar el código por token.</p>
-          <p>Status: ${tokenStatus}</p>
-          <pre style="white-space:pre-wrap;max-height:300px;overflow:auto;border:1px solid #ccc;padding:8px;">${escapeHtml((tokenText||'').substring(0,2000))}</pre>
-          <p>Chequeos rápidos: <strong>REDIRECT_URI</strong> en Discord App debe coincidir exactamente con DISCORD_REDIRECT_URL (incluye https y sin slash final), y CLIENT_ID/SECRET deben ser correctos.</p>
+          <p>Status: ${statusForUser}</p>
+          <pre style="white-space:pre-wrap;max-height:300px;overflow:auto;border:1px solid #ccc;padding:8px;">${escapeHtml(String(bodyForUser).substring(0,2000))}</pre>
+          <p>Chequeos rápidos: REDIRECT_URI en Discord App debe coincidir exactamente con DISCORD_REDIRECT_URL (incluye https y sin slash final), y CLIENT_ID/SECRET deben ser correctos.</p>
         `);
       }
-
-      if (!tokenData || !tokenData.access_token) {
-        console.error('Token exchange OK pero sin access_token:', tokenData);
-        return res.status(400).send('Error de autorización: no se recibió access_token. Revisa CLIENT_ID/SECRET/REDIRECT_URI.');
-      }
+      tokenData = tokenResult.data;
     } catch (err) {
-      console.error('Excepción durante token exchange:', err);
+      console.error('Excepción general intercambiando token:', err);
       return res.status(500).send('Error interno durante intercambio de token. Revisa logs.');
     }
 
-    // --- 2) Obtener datos del usuario ---
+    // --- 2) Obtener datos del usuario (robusto) ---
     let userData = null;
     try {
       const userResp = await fetch('https://discord.com/api/users/@me', {
@@ -693,6 +734,7 @@ app.get('/discord/callback', async (req, res) => {
       const addStatus = addResp.status;
       const addText = await addResp.text();
       console.log('DEBUG add-member via OAuth -> status:', addStatus, 'body (truncated):', (addText||'').substring(0,800));
+      // no abortamos si falla: puede fallar por permisos o jerarquía del bot.
     } catch (err) {
       console.warn('Advertencia: fallo add-member via OAuth PUT:', err);
     }
