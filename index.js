@@ -542,6 +542,10 @@ app.get('/discord/callback', async (req, res) => {
     const { code, state } = req.query;
     if (!code || !state) return res.status(400).send('Faltan parámetros');
 
+    // Sanity checks: variables críticas
+    if (!DISCORD_BOT_TOKEN) console.error('❌ DISCORD_BOT_TOKEN no definido (env) — el bot no podrá asignar roles');
+    if (!GUILD_ID) console.error('❌ GUILD_ID no definido (env) — no se pueden realizar operaciones en el servidor');
+
     // 1) Intercambiar code por access_token
     const params = new URLSearchParams({
       client_id: DISCORD_CLIENT_ID,
@@ -556,9 +560,10 @@ app.get('/discord/callback', async (req, res) => {
       body: params.toString()
     });
     const tokenData = await tokenResponse.json();
+    console.log('DEBUG oauth tokenData:', tokenData);
     if (!tokenData || !tokenData.access_token) {
       console.error('❌ Error obteniendo token:', tokenData);
-      return res.status(400).send('Error de autorización');
+      return res.status(400).send('Error de autorización (token).');
     }
 
     // 2) Obtener info del usuario
@@ -588,22 +593,26 @@ app.get('/discord/callback', async (req, res) => {
       let addText = '<no body>';
       try { addText = await addResp.text(); } catch(e) {}
       console.log(`DEBUG add-member via OAuth -> status: ${addStatus}, body: ${String(addText).substring(0,400)}`);
-      // Note: Discord retorna 201 or 204 on success or 204; si ya está en el servidor puede retornar 201/204
     } catch (err) {
       console.warn('⚠️ No se pudo añadir al usuario al guild via OAuth PUT:', err);
     }
 
-    // 4) Asignar rol según plan asociado al state/claim en DB
-    // buscar membership por claim = state
+    // 4) Buscar membership por claim = state (y reintentar si es necesario)
     let membership = null;
     try {
-      const { data: rows } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
+      const { data: rows, error } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
+      if (error) console.error('Error buscando membership por claim:', error);
       if (rows && rows.length > 0) membership = rows[0];
     } catch (err) {
       console.error('Error buscando membership por claim en callback:', err);
     }
 
-    // Guardar / actualizar membership: guardar discord_id y username, status, created_at si no existe
+    // Si no encontramos membership, lo avisamos pero seguimos (no bloqueamos el flujo)
+    if (!membership) {
+      console.warn('⚠️ No se encontró membership para claim (state):', state);
+    }
+
+    // 5) Guardar / actualizar membership: guardar discord_id y username, status, created_at si no existe
     try {
       const updates = {
         discord_id: discordId,
@@ -612,47 +621,68 @@ app.get('/discord/callback', async (req, res) => {
         redeemed_at: new Date().toISOString(),
         active: true
       };
+
       if (membership) {
         await supabase.from('memberships').update(updates).eq('id', membership.id);
+        // re-fetch to have freshest row and plan
+        const { data: refreshed } = await supabase.from('memberships').select('*').eq('id', membership.id).limit(1);
+        if (refreshed && refreshed.length > 0) membership = refreshed[0];
       } else {
         // Si por alguna razón no existe en DB, crear una fila mínima
         const row = {
           claim: state,
           name: userData.username || '',
           email: '', // no tenemos email via Discord
-          plan: membership ? membership.plan : 'plan_mensual',
+          plan: 'plan_mensual',
           discord_id: discordId,
           discord_username: discordUsername,
           created_at: new Date().toISOString(),
-          expires_at: calculateExpiryDate(membership ? membership.plan : 'plan_mensual'),
+          expires_at: calculateExpiryDate('plan_mensual'),
           active: true,
           used: true,
           redeemed_at: new Date().toISOString()
         };
-        await supabase.from('memberships').insert([row]);
+        const { data: ins, error: insErr } = await supabase.from('memberships').insert([row]).select().limit(1);
+        if (insErr) console.error('Error creando membership fallback:', insErr);
+        else if (ins && ins.length > 0) membership = ins[0];
       }
     } catch (err) {
       console.error('Error guardando/actualizando membership en callback:', err);
     }
 
-    // 5) Asignar rol al usuario
-    const planOfUser = membership ? (membership.plan || membership.plan_id) : 'plan_mensual';
+    // 6) Asignar rol al usuario (mejor logging y retrys)
+    const planOfUser = membership ? (membership.plan || membership.plan_id || 'plan_mensual') : 'plan_mensual';
     const roleId = getRoleIdForPlan(planOfUser);
-    if (roleId) {
-      const ok = await assignDiscordRole(discordId, roleId).catch(err => { console.error('assignDiscordRole error in callback:', err); return false; });
-      if (!ok) console.warn('⚠️ assignDiscordRole devolvió false — revisá permisos o jerarquía del bot.');
+
+    if (!roleId) {
+      console.error('❌ No se determinó roleId para plan:', planOfUser);
+      console.error('Verifica que las variables de entorno ROLE_ID_ANUALDISCORD / ROLE_ID_MENTORIADISCORD / ROLE_ID_SENALESDISCORD estén definidas.');
     } else {
-      console.warn('No se encontró roleId para plan:', planOfUser);
+      try {
+        // Intentos con backoff simple
+        let assigned = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          console.log(`Intentando asignar rol (attempt ${attempt}) -> roleId=${roleId} discordId=${discordId}`);
+          const ok = await assignDiscordRole(discordId, roleId);
+          if (ok) { assigned = true; break; }
+          await new Promise(r => setTimeout(r, 500 * attempt));
+        }
+        if (!assigned) console.error('❌ No se pudo asignar el rol después de varios intentos. Revisa permisos y jerarquía del bot.');
+        else console.log('✅ Rol asignado correctamente.');
+      } catch (err) {
+        console.error('❌ assignDiscordRole error in callback:', err);
+      }
     }
 
-    // 6) Redirigir a success
+    // 7) Redirigir a success (mostrar aviso si rol no se pudo asignar)
     const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg';
+    const msg = roleId ? 'Tu rol ha sido asignado correctamente (si el bot tiene permisos).' : 'Tu cuenta fue autorizada, pero no pudimos asignar el rol automáticamente. Contacta soporte.';
     return res.send(`
 <!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
 <body style="font-family:Arial,Helvetica,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
   <div style="background:rgba(255,255,255,0.04);padding:32px;border-radius:12px;text-align:center;">
     <h1>🎉 ¡Bienvenido!</h1>
-    <p>Tu rol ha sido asignado correctamente (si el bot tiene permisos). Serás redirigido en unos segundos...</p>
+    <p>${msg} Serás redirigido en unos segundos...</p>
     <a href="${successRedirect}" style="display:inline-block;margin-top:12px;padding:12px 20px;border-radius:8px;background:#fff;color:#111;text-decoration:none;font-weight:bold;">Ir a Discord</a>
   </div>
   <script>setTimeout(()=>{ window.location.href='${successRedirect}' }, 3000);</script>
@@ -773,4 +803,3 @@ app.listen(PORT, () => {
   console.log('🔔 Discord token presente?', !!DISCORD_BOT_TOKEN);
   console.log('🔗 Supabase presente?', !!SUPABASE_URL);
 });
-
