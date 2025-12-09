@@ -543,49 +543,109 @@ app.get('/api/auth/claim', async (req, res) => {
   }
 });
 
-// ============================================
-// CALLBACK DE DISCORD OAUTH2 -> /discord/callback
-// Intercambia code por token, obtiene user, agrega al guild usando el access_token y asigna rol.
-// Marca claim como used en DB luego de guardar membership.
+
+      console.warn('No se pudo confirmar estado final tras callback:', e);
+    }
+
+    // 6) Asignar rol al usuario
+    const planOfUser = membership ? (membership.plan || membership.plan_id) : 'plan_mensual';
+    const roleId = getRoleIdForPlan(planOfUser);
+    if (roleId) {
+      const ok = await assignDiscordRole(discordId, roleId).catch(err => { console.error('assignDiscordRole error in callback:', err); return false; });
+      if (!ok) console.warn('⚠️ assignDiscordRole devolvió false — revisá permisos o jerarquía del bot.');
+    } else {
+      console.warn('No se encontró roleId para plan:', planOfUser);
+    }// CALLBACK DE DISCORD OAUTH2 -> /discord/callback (REEMPLAZAR)
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
-    if (!code || !state) return res.status(400).send('Faltan parámetros');
-
-    // 1) Intercambiar code por access_token
-    const params = new URLSearchParams({
-      client_id: DISCORD_CLIENT_ID,
-      client_secret: DISCORD_CLIENT_SECRET,
-      grant_type: 'authorization_code',
-      code: code,
-      redirect_uri: DISCORD_REDIRECT_URL
-    });
-    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString()
-    });
-    const tokenData = await tokenResponse.json();
-    if (!tokenData || !tokenData.access_token) {
-      console.error('❌ Error obteniendo token:', tokenData);
-      return res.status(400).send('Error de autorización');
+    if (!code || !state) {
+      console.warn('Callback recibido sin code o state:', { code, state });
+      return res.status(400).send('Faltan parámetros (code o state).');
     }
 
-    // 2) Obtener info del usuario
-    const userResponse = await fetch('https://discord.com/api/users/@me', {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` }
-    });
-    const userData = await userResponse.json();
-    const discordId = userData.id;
-    const discordUsername = userData.username;
+    // --- 1) Intercambio code -> token (robusto) ---
+    let tokenData = null;
+    try {
+      const params = new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: DISCORD_REDIRECT_URL
+      });
+
+      const tokenResp = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+
+      const tokenStatus = tokenResp.status;
+      const tokenText = await tokenResp.text(); // leer como texto siempre
+      console.log('DEBUG token exchange -> status:', tokenStatus, 'raw body (truncated):', tokenText?.substring(0,1000));
+
+      // Intentar parsear JSON; si falla, devolver error informativo
+      try {
+        tokenData = JSON.parse(tokenText);
+      } catch (parseErr) {
+        console.error('Token exchange devolvió body no-JSON. status:', tokenStatus, 'body starts with:', (tokenText||'').substring(0,120));
+        return res.status(400).send(`
+          <h2>Error de autorización (token exchange)</h2>
+          <p>Discord devolvió una respuesta inesperada al intercambiar el código por token.</p>
+          <p>Status: ${tokenStatus}</p>
+          <pre style="white-space:pre-wrap;max-height:300px;overflow:auto;border:1px solid #ccc;padding:8px;">${escapeHtml((tokenText||'').substring(0,2000))}</pre>
+          <p>Chequeos rápidos: <strong>REDIRECT_URI</strong> en Discord App debe coincidir exactamente con DISCORD_REDIRECT_URL (incluye https y sin slash final), y CLIENT_ID/SECRET deben ser correctos.</p>
+        `);
+      }
+
+      if (!tokenData || !tokenData.access_token) {
+        console.error('Token exchange OK pero sin access_token:', tokenData);
+        return res.status(400).send('Error de autorización: no se recibió access_token. Revisa CLIENT_ID/SECRET/REDIRECT_URI.');
+      }
+    } catch (err) {
+      console.error('Excepción durante token exchange:', err);
+      return res.status(500).send('Error interno durante intercambio de token. Revisa logs.');
+    }
+
+    // --- 2) Obtener datos del usuario (robusto) ---
+    let userData = null;
+    try {
+      const userResp = await fetch('https://discord.com/api/users/@me', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+      });
+      const userStatus = userResp.status;
+      const userText = await userResp.text();
+      console.log('DEBUG fetch user -> status:', userStatus, 'raw body (truncated):', userText?.substring(0,1000));
+      try {
+        userData = JSON.parse(userText);
+      } catch (parseErr) {
+        console.error('Fetch user devolvió body no-JSON. status:', userStatus, 'body starts with:', (userText||'').substring(0,120));
+        return res.status(400).send(`
+          <h2>Error obteniendo usuario</h2>
+          <p>Discord devolvió una respuesta inesperada al pedir /users/@me.</p>
+          <p>Status: ${userStatus}</p>
+          <pre style="white-space:pre-wrap;max-height:300px;overflow:auto;border:1px solid #ccc;padding:8px;">${escapeHtml((userText||'').substring(0,2000))}</pre>
+          <p>Posibles causas: scope insuficiente, token inválido o problemas de red.</p>
+        `);
+      }
+      if (!userData || !userData.id) {
+        console.error('No se obtuvo user.id de Discord. userData:', userData);
+        return res.status(400).send('No se pudo obtener datos del usuario desde Discord. Revisa los scopes y token.');
+      }
+    } catch (err) {
+      console.error('Excepción al obtener user info:', err);
+      return res.status(500).send('Error interno obteniendo datos del usuario desde Discord.');
+    }
+
+    const discordId = String(userData.id);
+    const discordUsername = userData.username || discordId;
     console.log('👤 Usuario Discord (OAuth):', discordUsername, discordId);
 
-    // 3) Intentar agregar al guild usando el access_token (esto añade al usuario si no estaba)
+    // --- 3) Intentar añadir al guild (no fatal) ---
     try {
       const putUrl = `https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`;
-      const putBody = {
-        access_token: tokenData.access_token
-      };
+      const putBody = { access_token: tokenData.access_token };
       const addResp = await fetch(putUrl, {
         method: 'PUT',
         headers: {
@@ -595,37 +655,44 @@ app.get('/discord/callback', async (req, res) => {
         body: JSON.stringify(putBody)
       });
       const addStatus = addResp.status;
-      let addText = '<no body>';
-      try { addText = await addResp.text(); } catch(e) {}
-      console.log(`DEBUG add-member via OAuth -> status: ${addStatus}, body: ${String(addText).substring(0,400)}`);
-      // Note: Discord retorna 201 or 204 on success o 204; si ya está en el servidor puede retornar 201/204
+      const addText = await addResp.text();
+      console.log('DEBUG add-member via OAuth -> status:', addStatus, 'body (truncated):', (addText||'').substring(0,800));
+      // no abortamos si falla: puede fallar por permisos o jerarquía del bot.
     } catch (err) {
-      console.warn('⚠️ No se pudo añadir al usuario al guild via OAuth PUT:', err);
+      console.warn('Advertencia: fallo add-member via OAuth PUT:', err);
     }
 
-    // ----------------------------------------
-    // 4) BUSCAR membership por claim = state y validar ESTADO (estricto)
+    // --- 4) Buscar membership por claim/state ---
     let membership = null;
     try {
-      const { data: rows } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
-      if (rows && rows.length > 0) membership = rows[0];
+      const { data: rows, error } = await supabase
+        .from('memberships')
+        .select('*')
+        .eq('claim', state)
+        .limit(1);
+
+      if (error) {
+        console.error('Error consultando membership en callback:', error);
+        return res.status(500).send('Error interno consultando membership. Revisa logs.');
+      }
+      if (!rows || rows.length === 0) {
+        console.warn('Claim no existe en DB (state):', state);
+        return res.status(400).send('Enlace inválido o expirado. Contacta soporte.');
+      }
+      membership = rows[0];
+
+      if (membership.used === true || membership.revoked_at || membership.discord_id) {
+        console.warn('Claim en estado inválido (used/revoked/discord_id):', {
+          used: membership.used, revoked_at: membership.revoked_at, discord_id: membership.discord_id
+        });
+        return res.status(400).send('Este enlace ya fue utilizado o ha sido revocado. Contacta soporte.');
+      }
     } catch (err) {
-      console.error('Error buscando membership por claim en callback:', err);
+      console.error('Excepción leyendo membership:', err);
+      return res.status(500).send('Error interno leyendo membership.');
     }
 
-    // Si la membership NO existe -> rechazamos (no crear una fila nueva automáticamente)
-    if (!membership) {
-      console.warn('Callback OAuth: claim no existe en DB -> rechazar.');
-      return res.status(400).send('Enlace inválido o expirado. Contacta soporte.');
-    }
-
-    // Validaciones estrictas: si ya fue usado, revocado o ya tiene discord_id -> no se permite reutilizar
-    if (membership.used === true || membership.revoked_at || membership.discord_id) {
-      console.warn('Callback OAuth: claim inválido (ya usado/revocado/vinculado).');
-      return res.status(400).send('Este enlace ya fue utilizado o ha sido revocado. Contacta soporte si necesitas ayuda.');
-    }
-
-    // 5) Actualizamos la fila de membership de forma condicional (atómica): sólo si sigue sin usarse y sin discord_id
+    // --- 5) UPDATE condicional (atómico) ---
     try {
       const updates = {
         discord_id: discordId,
@@ -647,22 +714,25 @@ app.get('/discord/callback', async (req, res) => {
 
       if (updErr) {
         console.error('Error actualizando membership en callback:', updErr);
-      } else if (!updatedRows || updatedRows.length === 0) {
-        console.warn('Callback OAuth: la fila no pudo actualizarse (probablemente utilizada en paralelo).');
-        return res.status(400).send('Este enlace ya fue utilizado o no es válido. Contacta soporte.');
-      } else {
-        membership = updatedRows[0];
+        return res.status(500).send('Error interno actualizando membership.');
       }
+      if (!updatedRows || updatedRows.length === 0) {
+        console.warn('No se pudo actualizar membership (probable race).');
+        return res.status(400).send('Este enlace ya fue utilizado o no es válido. Contacta soporte.');
+      }
+      membership = updatedRows[0];
+      console.log('Membership actualizado OK:', membership.id || membership.claim);
     } catch (err) {
-      console.error('Error guardando/actualizando membership en callback:', err);
+      console.error('Excepción actualizando membership:', err);
+      return res.status(500).send('Error interno guardando membership.');
     }
 
-    // SECURITY CHECK: confirmar estado final
+    // --- 6) Confirmación final (safety re-check) ---
     try {
       const { data: finalRows } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
       if (finalRows && finalRows.length > 0) {
         const final = finalRows[0];
-        if (!final.used || final.discord_id !== String(discordId)) {
+        if (!final.used || String(final.discord_id) !== String(discordId)) {
           console.error('ALERTA: inconsistencia tras la actualización en callback:', final);
           return res.status(500).send('Error interno procesando el canje. Contacta soporte.');
         }
@@ -671,33 +741,38 @@ app.get('/discord/callback', async (req, res) => {
       console.warn('No se pudo confirmar estado final tras callback:', e);
     }
 
-    // 6) Asignar rol al usuario
-    const planOfUser = membership ? (membership.plan || membership.plan_id) : 'plan_mensual';
-    const roleId = getRoleIdForPlan(planOfUser);
-    if (roleId) {
-      const ok = await assignDiscordRole(discordId, roleId).catch(err => { console.error('assignDiscordRole error in callback:', err); return false; });
-      if (!ok) console.warn('⚠️ assignDiscordRole devolvió false — revisá permisos o jerarquía del bot.');
-    } else {
-      console.warn('No se encontró roleId para plan:', planOfUser);
+    // --- 7) Asignar rol ---
+    try {
+      const planOfUser = membership.plan || membership.plan_id || 'plan_mensual';
+      const roleId = getRoleIdForPlan(planOfUser);
+      if (roleId) {
+        const ok = await assignDiscordRole(discordId, roleId).catch(err => { console.error('assignDiscordRole error:', err); return false; });
+        if (!ok) console.warn('assignDiscordRole devolvió false — revisá permisos o jerarquía del bot.');
+      } else {
+        console.warn('No se encontró roleId para plan:', planOfUser);
+      }
+    } catch (err) {
+      console.error('Excepción asignando rol:', err);
     }
 
-    // 7) Redirigir a success
+    // --- 8) Redirect success ---
     const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg';
     return res.send(`
-<!DOCTYPE html><html><head><meta charset="UTF-8"><title>¡Bienvenido!</title></head>
-<body style="font-family:Arial,Helvetica,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-  <div style="background:rgba(255,255,255,0.04);padding:32px;border-radius:12px;text-align:center;">
-    <h1>🎉 ¡Bienvenido!</h1>
-    <p>Tu rol ha sido asignado correctamente (si el bot tiene permisos). Serás redirigido en unos segundos...</p>
-    <a href="${successRedirect}" style="display:inline-block;margin-top:12px;padding:12px 20px;border-radius:8px;background:#fff;color:#111;text-decoration:none;font-weight:bold;">Ir a Discord</a>
-  </div>
-  <script>setTimeout(()=>{ window.location.href='${successRedirect}' }, 3000);</script>
-</body></html>`);
+      <!doctype html><html><head><meta charset="utf-8"><title>¡Bienvenido!</title></head>
+      <body style="font-family:Arial,Helvetica,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+        <div style="background:rgba(255,255,255,0.04);padding:32px;border-radius:12px;text-align:center;">
+          <h1>🎉 ¡Bienvenido!</h1>
+          <p>Tu rol ha sido asignado correctamente (si el bot tiene permisos). Serás redirigido en unos segundos...</p>
+          <a href="${successRedirect}" style="display:inline-block;margin-top:12px;padding:12px 20px;border-radius:8px;background:#fff;color:#111;text-decoration:none;font-weight:bold;">Ir a Discord</a>
+        </div>
+        <script>setTimeout(()=>{ window.location.href='${successRedirect}' }, 3000);</script>
+      </body></html>`);
   } catch (err) {
-    console.error('❌ Error en discord callback:', err);
+    console.error('❌ Error inesperado en discord callback:', err);
     return res.status(500).send('Error procesando la autorización');
   }
 });
+
 
 // ============================================
 // EXPIRACIONES AUTOMÁTICAS
