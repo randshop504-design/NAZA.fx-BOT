@@ -543,19 +543,8 @@ app.get('/api/auth/claim', async (req, res) => {
   }
 });
 
-
-      console.warn('No se pudo confirmar estado final tras callback:', e);
-    }
-
-    // 6) Asignar rol al usuario
-    const planOfUser = membership ? (membership.plan || membership.plan_id) : 'plan_mensual';
-    const roleId = getRoleIdForPlan(planOfUser);
-    if (roleId) {
-      const ok = await assignDiscordRole(discordId, roleId).catch(err => { console.error('assignDiscordRole error in callback:', err); return false; });
-      if (!ok) console.warn('⚠️ assignDiscordRole devolvió false — revisá permisos o jerarquía del bot.');
-    } else {
-      console.warn('No se encontró roleId para plan:', planOfUser);
-    }// CALLBACK DE DISCORD OAUTH2 -> /discord/callback (REEMPLAZAR)
+// ============================================
+// CALLBACK DE DISCORD OAUTH2 -> /discord/callback (robusto)
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -582,7 +571,7 @@ app.get('/discord/callback', async (req, res) => {
       });
 
       const tokenStatus = tokenResp.status;
-      const tokenText = await tokenResp.text(); // leer como texto siempre
+      const tokenText = await tokenResp.text();
       console.log('DEBUG token exchange -> status:', tokenStatus, 'raw body (truncated):', tokenText?.substring(0,1000));
 
       // Intentar parsear JSON; si falla, devolver error informativo
@@ -772,7 +761,6 @@ app.get('/discord/callback', async (req, res) => {
     return res.status(500).send('Error procesando la autorización');
   }
 });
-
 
 // ============================================
 // EXPIRACIONES AUTOMÁTICAS
