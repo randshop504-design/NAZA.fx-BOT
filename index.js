@@ -514,15 +514,16 @@ app.post('/redeem-claim', async (req, res) => {
 // ============================================
 
 // RUTA: /api/auth/claim  -> redirige al OAuth de Discord (el link que mandamos por email)
+// ---- CAMBIO: ahora GENERA un state_token efímero en DB y REDIRIGE con state=state_token
 app.get('/api/auth/claim', async (req, res) => {
-  const token = req.query.token || req.query.state;
-  if (!token) return res.status(400).send('Token missing');
+  const claim = req.query.token || req.query.state;
+  if (!claim) return res.status(400).send('Token missing');
   try {
     // Verificamos que exista y no esté usado
     const { data: rows, error } = await supabase
       .from('memberships')
-      .select('id,claim,used')
-      .eq('claim', token)
+      .select('id,claim,used,active')
+      .eq('claim', claim)
       .limit(1);
     if (error) {
       console.error('Error leyendo claim:', error);
@@ -531,17 +532,36 @@ app.get('/api/auth/claim', async (req, res) => {
     if (!rows || rows.length === 0) {
       return res.status(400).send('Enlace inválido. Contacta soporte.');
     }
-    const claimRow = rows[0];
-    if (claimRow.used) {
+    const membership = rows[0];
+    if (membership.used) {
       return res.status(400).send('Este enlace ya fue utilizado.');
     }
+    if (membership.active === false) {
+      return res.status(400).send('Esta membership no está activa.');
+    }
 
-    // Redirigir a OAuth2 de Discord usando token como state
+    // GENERAR state_token único y guardarlo (efímero)
+    const stateToken = crypto.randomBytes(30).toString('hex');
+    const stateCreatedAt = new Date().toISOString();
+
+    const { data: upd, error: upErr } = await supabase
+      .from('memberships')
+      .update({ state_token: stateToken, state_created_at: stateCreatedAt })
+      .eq('id', membership.id)
+      .select()
+      .limit(1);
+
+    if (upErr) {
+      console.error('Error guardando state_token:', upErr);
+      return res.status(500).send('Error interno');
+    }
+
+    // Redirigir a OAuth2 de Discord usando state = stateToken
     const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
     const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
     const scope = encodeURIComponent('identify guilds.join');
     const prompt = 'consent';
-    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${encodeURIComponent(token)}&prompt=${prompt}`;
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${encodeURIComponent(stateToken)}&prompt=${prompt}`;
     return res.redirect(discordAuthUrl);
   } catch (err) {
     console.error('❌ Error en /api/auth/claim:', err);
@@ -552,7 +572,7 @@ app.get('/api/auth/claim', async (req, res) => {
 // ============================================
 // CALLBACK DE DISCORD OAUTH2 -> /discord/callback
 // Intercambia code por token, obtiene user, agrega al guild usando el access_token y asigna rol.
-// Marca claim como used en DB luego de guardar membership.
+// MARK: ahora busca membership por state_token y lo consume de forma atómica.
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -613,61 +633,67 @@ app.get('/discord/callback', async (req, res) => {
       console.warn('⚠️ No se pudo añadir al usuario al guild via OAuth PUT:', err);
     }
 
-    // 4) Buscar membership por claim = state (y reintentar si es necesario)
+    // 4) Buscar membership por state_token (state) y VALIDAR
     let membership = null;
     try {
-      const { data: rows, error } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
-      if (error) console.error('Error buscando membership por claim:', error);
+      const { data: rows, error } = await supabase.from('memberships').select('*').eq('state_token', state).limit(1);
+      if (error) console.error('Error buscando membership por state_token:', error);
       if (rows && rows.length > 0) membership = rows[0];
     } catch (err) {
-      console.error('Error buscando membership por claim en callback:', err);
+      console.error('Error buscando membership por state_token en callback:', err);
     }
 
-    // Si no encontramos membership, lo avisamos pero seguimos (no bloqueamos el flujo)
     if (!membership) {
-      console.warn('⚠️ No se encontró membership para claim (state):', state);
+      console.warn('⚠️ No se encontró membership para state_token (state):', state);
+      return res.status(400).send('Enlace inválido o expirado. Contacta soporte.');
     }
 
-    // 5) Guardar / actualizar membership: guardar discord_id y username, status, created_at si no existe
-    try {
-      const updates = {
-        discord_id: discordId,
-        discord_username: discordUsername,
-        used: true,
-        redeemed_at: new Date().toISOString(),
-        active: true
-      };
-
-      if (membership) {
-        await supabase.from('memberships').update(updates).eq('id', membership.id);
-        // re-fetch to have freshest row and plan
-        const { data: refreshed } = await supabase.from('memberships').select('*').eq('id', membership.id).limit(1);
-        if (refreshed && refreshed.length > 0) membership = refreshed[0];
-      } else {
-        // Si por alguna razón no existe en DB, crear una fila mínima
-        const row = {
-          claim: state,
-          name: userData.username || '',
-          email: '', // no tenemos email via Discord
-          plan: 'plan_mensual',
-          discord_id: discordId,
-          discord_username: discordUsername,
-          created_at: new Date().toISOString(),
-          expires_at: calculateExpiryDate('plan_mensual'),
-          active: true,
-          used: true,
-          redeemed_at: new Date().toISOString()
-        };
-        const { data: ins, error: insErr } = await supabase.from('memberships').insert([row]).select().limit(1);
-        if (insErr) console.error('Error creando membership fallback:', insErr);
-        else if (ins && ins.length > 0) membership = ins[0];
+    // Opcional: validar expiración del state_token (ejemplo 15 min)
+    if (membership.state_created_at) {
+      try {
+        const createdTs = new Date(membership.state_created_at).getTime();
+        const nowTs = Date.now();
+        const diffMinutes = (nowTs - createdTs) / (1000 * 60);
+        if (diffMinutes > 15) {
+          return res.status(400).send('El enlace expiró. Generá uno nuevo desde tu correo.');
+        }
+      } catch(e) {
+        // no bloquear si falla parseo
       }
-    } catch (err) {
-      console.error('Error guardando/actualizando membership en callback:', err);
+    }
+
+    // 5) Consumir la membership de forma atómica: solo actualizar si used === false
+    const updates = {
+      discord_id: discordId,
+      discord_username: discordUsername,
+      used: true,
+      redeemed_at: new Date().toISOString(),
+      active: true,
+      state_token: null,
+      state_created_at: null
+    };
+
+    const { data: updatedRows, error: updateErr } = await supabase
+      .from('memberships')
+      .update(updates)
+      .eq('id', membership.id)
+      .eq('used', false)           // condicional importante para evitar race
+      .select()
+      .limit(1);
+
+    if (updateErr) {
+      console.error('Error marcando membership como usada:', updateErr);
+      return res.status(500).send('Error interno');
+    }
+
+    if (!updatedRows || updatedRows.length === 0) {
+      // Alguien más reclamó justo ahora
+      return res.status(400).send('Este enlace ya fue reclamado por otra persona.');
     }
 
     // 6) Asignar rol al usuario (mejor logging y retrys)
-    const planOfUser = membership ? (membership.plan || membership.plan_id || 'plan_mensual') : 'plan_mensual';
+    const finalMembership = updatedRows[0];
+    const planOfUser = finalMembership ? (finalMembership.plan || finalMembership.plan_id || 'plan_mensual') : 'plan_mensual';
     const roleId = getRoleIdForPlan(planOfUser);
 
     if (!roleId) {
