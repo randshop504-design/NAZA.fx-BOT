@@ -146,9 +146,17 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
   }
 }
 
-// Expiry email (simple)
+// ================= Expiry email (mejorado visualmente, usa mismos colores y logo que bienvenida)
+// Incluye CTA para volver a comprar en https://www.nazatradingacademy.com
 function buildExpiryEmailHtml({ name, planName, membershipId, email, reactivateUrl }) {
-  return `<!doctype html><html><body style="background:#000;color:#fff;font-family:Arial,sans-serif;padding:24px;"><div style="max-width:680px;margin:0 auto;background:rgba(255,255,255,0.02);padding:24px;border-radius:12px;"><h2 style="color:#ff9b3b;">Tu acceso ha expirado</h2><p>Hola ${escapeHtml(name || 'usuario')},</p><p>Tu suscripción ${escapeHtml(planName || '')} asociada a ${escapeHtml(email || '')} ha expirado y tus permisos en Discord fueron revocados.</p><p style="text-align:center;"><a href="${reactivateUrl}" style="display:inline-block;padding:12px 20px;border-radius:10px;background:#2d9bf0;color:#fff;text-decoration:none;">Reactivar mi acceso</a></p><p>Soporte: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p></div></body></html>`;
+  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+  const siteUrl = FRONTEND_URL || 'https://www.nazatradingacademy.com';
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>body{margin:0;padding:0;background:#000;color:#fff;font-family:Arial,sans-serif}a{color:#bfe0ff}</style></head><body style="background:#000;padding:24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table width="680" style="max-width:680px;width:100%;margin:0 auto;"><tr><td style="padding:0 16px;"><table style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);width:100%"><tr><td style="padding:28px 24px 8px 24px;text-align:center;"><div style="width:84px;height:84px;border-radius:50%;overflow:hidden;margin:0 auto;border:3px solid rgba(255,255,255,0.03);background:linear-gradient(135deg,#0f1720,#08101a)"><img src="${logoPath}" alt="NAZA logo" width="84" height="84" style="width:84px;height:84px;object-fit:cover;border-radius:50%"></div><h2 style="color:#ff9b3b;margin:16px 0 8px 0;font-size:22px">Tu acceso ha expirado</h2><div style="color:#cbd5e1;font-size:15px">Hola ${escapeHtml(name || 'usuario')},</div></td></tr><tr><td style="padding:18px 28px 24px 28px;color:#d6e6f8;font-size:15px;line-height:1.5"><p style="margin:0 0 12px 0;">Tu suscripción <strong>${escapeHtml(planName || '')}</strong> (ID: ${escapeHtml(membershipId || '')}) asociada a <strong>${escapeHtml(email || '')}</strong> ha expirado y los permisos en Discord fueron removidos.</p><p style="margin:0 0 12px 0;">Si deseas volver a acceder a los contenidos y canales privados, puedes renovar tu suscripción o comprar otra vez desde nuestra web. Haciendo clic en <strong>Reactivar mi acceso</strong> te llevamos al formulario para reactivar o adquirir un nuevo plan.</p><div style="text-align:center;margin:18px 0;"><a href="${reactivateUrl}" style="display:inline-block;background:#2d9bf0;color:#ffffff;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(45,155,240,0.15);">Reactivar mi acceso</a></div><div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:14px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:6px;"><p style="margin:6px 0 8px 0;font-weight:600;color:#bfe0ff">¿Quieres comprar otra vez?</p><p style="margin:0 0 8px 0;color:#d6e6f8">Visita <a href="${siteUrl}" target="_blank">${siteUrl}</a> y elige el plan que más te convenga. Si necesitas ayuda con el proceso de compra, escríbenos a <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p></div></td></tr><tr><td style="padding:16px 18px 20px 18px;text-align:center;color:#98b0c8;font-size:13px;border-top:1px solid rgba(255,255,255,0.02)"><div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: <a href="mailto:${SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${SUPPORT_EMAIL}</a></div></td></tr></table></td></tr></table></td></tr></table></body></html>`;
+}
+
+function buildExpiryEmailText({ name, planName, membershipId, email, reactivateUrl }) {
+  const siteUrl = FRONTEND_URL || 'https://www.nazatradingacademy.com';
+  return `Hola ${name || 'usuario'},\n\nTu suscripción ${planName} (ID: ${membershipId || ''}) asociada a ${email || ''} ha expirado y tus permisos en Discord fueron revocados.\n\nPara reactivar tu acceso o comprar un nuevo plan visita: ${reactivateUrl}\n\nTambién puedes entrar a ${siteUrl} para ver los planes disponibles.\n\nSi necesitas ayuda: ${SUPPORT_EMAIL}\n\n— NAZA Trading Academy`;
 }
 
 async function sendExpiryEmail(membership) {
@@ -159,10 +167,10 @@ async function sendExpiryEmail(membership) {
   try {
     const planNames = { 'plan_anual':'Plan Anual', 'plan_trimestral':'Plan Trimestral', 'plan_mensual':'Plan Mensual' };
     const planName = planNames[membership.plan] || membership.plan || 'Plan';
-    const reactivateUrl = FRONTEND_URL ? `${FRONTEND_URL}/reactivar?membership=${encodeURIComponent(membership.id)}&email=${encodeURIComponent(membership.email)}` : `mailto:${SUPPORT_EMAIL}?subject=Reactivacion%20de%20membership%20${membership.id}`;
+    const reactivateUrl = FRONTEND_URL ? `${FRONTEND_URL}/reactivar?membership=${encodeURIComponent(membership.id)}&email=${encodeURIComponent(membership.email)}` : `https://www.nazatradingacademy.com`;
     const html = buildExpiryEmailHtml({ name: membership.name, planName, membershipId: membership.id, email: membership.email, reactivateUrl });
-    const text = `Hola ${membership.name || ''}, tu suscripción (${planName}) ha expirado. Reactiva: ${reactivateUrl}`;
-    const msg = { to: membership.email, from: FROM_EMAIL, subject: `Tu acceso a NAZA ha expirado — reactivá tu cuenta`, text, html };
+    const text = buildExpiryEmailText({ name: membership.name, planName, membershipId: membership.id, email: membership.email, reactivateUrl });
+    const msg = { to: membership.email, from: FROM_EMAIL, subject: `Tu acceso a NAZA ha expirado — reactivá o compra otro plan`, text, html };
     await sgMail.send(msg);
     console.log('✅ Expiry email enviado a', membership.email);
     return true;
