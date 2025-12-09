@@ -1,5 +1,4 @@
-// index.js - NAZA Bot (final, robusto)
-// Requisitos: Node >=18, @sendgrid/mail, @supabase/supabase-js, discord.js
+// index.js - NAZA Bot (final, robusto) - VALIDACIÓN de contraseña tolerante
 require('dotenv').config();
 const express = require('express');
 const { Client, GatewayIntentBits } = require('discord.js');
@@ -28,8 +27,10 @@ const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD || process.env.ROL
 const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL || '';
 const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_MENSUAL || '';
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
-// <-- se pidió explícitamente usar literal exacto: Alex13102001$$$
+
+// IMPORTANT: default literal password requested by user
 const API_PASSWORD = process.env.API_PASSWORD || 'Alex13102001$$$';
+const FRONTEND_TOKEN = process.env.x_frontend_token || process.env.FRONTEND_TOKEN || process.env.x_frontend_token || process.env.FRONTEND_TOKEN || process.env.FRONTEND_TOKEN || 'naza_frontend_secret_2024';
 
 // Configure SendGrid
 if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
@@ -62,13 +63,35 @@ discordClient.once('ready', () => {
 // Utilities
 function escapeHtml(str) {
   if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\'/g,'&#39;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
+// NEW: Validate password from body OR header 'x-admin-key'
+// Accepts:
+//  - JSON body: { password: "Alex13102001$$$" }
+//  - HTTP header: "x-admin-key: Alex13102001$$$"
 function validatePasswordFromBody(req) {
-  const sent = (req.body && req.body.password) ? String(req.body.password) : '';
-  if (!sent) return false;
-  return sent === API_PASSWORD;
+  try {
+    const sentBody = (req.body && req.body.password) ? String(req.body.password) : '';
+    const sentHeader = req.headers && (req.headers['x-admin-key'] || req.headers['x-admin_key'] || req.headers['x-adminkey']) ? String(req.headers['x-admin-key'] || req.headers['x-admin_key'] || req.headers['x-adminkey']) : '';
+    // Accept either location. Exact literal comparison.
+    if (sentBody && sentBody === API_PASSWORD) return true;
+    if (sentHeader && sentHeader === API_PASSWORD) return true;
+    return false;
+  } catch (err) {
+    console.warn('validatePasswordFromBody exception', err);
+    return false;
+  }
 }
+
+// Log masked API_PASSWORD at startup (not full value)
+function maskedSecret(s) {
+  if (!s) return '(empty)';
+  if (s.length <= 6) return '******';
+  return s.slice(0,2) + '...' + s.slice(-2);
+}
+console.log('🔐 API_PASSWORD (masked) =', maskedSecret(API_PASSWORD));
+console.log('🔐 FRONTEND_TOKEN (masked) =', maskedSecret(FRONTEND_TOKEN));
 
 // ================= Email templates (bienvenida + expiración)
 function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
@@ -180,25 +203,17 @@ async function assignDiscordRole(discordId, roleId) {
   }
 }
 
-/* robust removeDiscordRole: API -> discord.js fallback -> checks jerarquía y devuelve true/false */
 async function removeDiscordRole(discordId, roleId) {
   if (!discordId || !roleId) return false;
-  // API attempt
   try {
     const okApi = await removeRoleFromMemberViaApi(discordId, roleId);
     if (okApi) return true;
   } catch (e) { console.warn('removeDiscordRole api attempt err', e); }
-  // Fallback: discord.js
   try {
     const guild = await discordClient.guilds.fetch(GUILD_ID);
     if (!guild) return false;
-    // fetch member (if not in guild, cannot remove)
     let member;
     try { member = await guild.members.fetch(discordId); } catch (fetchErr) { console.warn('No member to fetch (maybe left) ', fetchErr?.message || fetchErr); return false; }
-    // log roles
-    const memberRoles = member.roles.cache.map(r => ({ id: r.id, name: r.name, position: r.position }));
-    console.log('DEBUG member.roles count', memberRoles.length);
-    // bot roles
     const botMember = await guild.members.fetch(discordClient.user?.id);
     const botMaxPos = Math.max(...botMember.roles.cache.map(r => r.position), 0);
     const targetRole = guild.roles.cache.get(roleId);
@@ -207,7 +222,6 @@ async function removeDiscordRole(discordId, roleId) {
       console.error('Bot hierarchy insufficient to remove role (botMaxPos <= targetPos)');
       return false;
     }
-    // try remove
     try {
       await member.roles.remove(roleId);
       return true;
@@ -221,7 +235,6 @@ async function removeDiscordRole(discordId, roleId) {
   }
 }
 
-// Helper: update DB to mark role_removed (so we don't try repeatedly)
 async function markRoleRemovedInDB(id) {
   try {
     const { error } = await supabase.from('memberships').update({ role_removed: true, updated_at: new Date().toISOString() }).eq('id', id);
@@ -233,7 +246,6 @@ async function markRoleRemovedInDB(id) {
   }
 }
 
-// ================= Helpers expiry / roles mapping
 function calculateExpiryDate(plan) {
   const now = new Date();
   let days = 30;
@@ -257,10 +269,8 @@ function getRoleIdForPlan(planId) {
 
 // ================= ROUTES
 
-// Health
 app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// create-membership
 app.post('/create-membership', async (req, res) => {
   try {
     if (!validatePasswordFromBody(req)) return res.status(401).json({ success:false, message:'password inválida' });
@@ -294,12 +304,10 @@ app.post('/create-membership', async (req, res) => {
     }
     if (!inserted) return res.status(500).json({ success:false, message:'No se pudo generar un claim único.' });
 
-    // send welcome email async (we DO NOT block response)
     sendWelcomeEmail(inserted.email, inserted.name, inserted.plan, null, null, {}, inserted.claim)
       .then(()=> console.log('Email enviado (async)'))
       .catch(err => console.error('Error enviando welcome email:', err));
 
-    // if discordId provided, attempt assign role (best-effort)
     if (discordId) {
       const roleId = getRoleIdForPlan(inserted.plan);
       if (roleId) assignDiscordRole(discordId, roleId).catch(err => console.error('assignDiscordRole create-membership err:', err));
@@ -312,14 +320,12 @@ app.post('/create-membership', async (req, res) => {
   }
 });
 
-// redeem-claim (API)
 app.post('/redeem-claim', async (req, res) => {
   try {
     if (!validatePasswordFromBody(req)) return res.status(401).json({ success:false, message:'password inválida' });
     const { claim, discordId } = req.body || {};
     if (!claim) return res.status(400).json({ success:false, message:'claim es requerido' });
 
-    // fetch membership
     const { data: rows, error: fetchErr } = await supabase.from('memberships').select('*').eq('claim', claim).limit(1);
     if (fetchErr) return res.status(500).json({ success:false, message:'Error interno' });
     if (!rows || rows.length === 0) return res.status(404).json({ success:false, message:'Claim no encontrado' });
@@ -329,7 +335,6 @@ app.post('/redeem-claim', async (req, res) => {
     if (membership.revoked_at) return res.status(400).json({ success:false, message:'Este claim fue revocado.' });
     if (membership.discord_id) return res.status(400).json({ success:false, message:'Este claim ya está vinculado a un Discord ID.' });
 
-    // atomic update: mark used, active false, redeemed_at
     const updates = { used: true, active: false, redeemed_at: new Date().toISOString() };
     if (discordId) updates.discord_id = discordId;
     const { data: updateData, error: updateErr } = await supabase.from('memberships').update(updates).eq('claim', claim).eq('used', false).is('discord_id', null).is('revoked_at', null).select().limit(1);
@@ -338,7 +343,6 @@ app.post('/redeem-claim', async (req, res) => {
 
     const updatedMembership = Array.isArray(updateData) ? updateData[0] : updateData;
 
-    // assign role if discordId provided OR membership had it (best-effort)
     const finalDiscordId = discordId || updatedMembership.discord_id;
     if (finalDiscordId) {
       const roleId = getRoleIdForPlan(updatedMembership.plan || updatedMembership.plan_id);
@@ -356,7 +360,6 @@ app.post('/redeem-claim', async (req, res) => {
   }
 });
 
-// /api/auth/claim -> redirect to Discord oauth (validates claim first)
 app.get('/api/auth/claim', async (req, res) => {
   const token = req.query.token || req.query.state;
   if (!token) return res.status(400).send('Token missing');
@@ -369,7 +372,6 @@ app.get('/api/auth/claim', async (req, res) => {
     if (claimRow.revoked_at) return res.status(400).send('Este enlace ha sido revocado.');
     if (claimRow.discord_id) return res.status(400).send('Este enlace ya fue vinculado a una cuenta. Contacta soporte.');
 
-    // redirect to Discord oauth
     const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
     const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
     const scope = encodeURIComponent('identify guilds.join');
@@ -382,14 +384,12 @@ app.get('/api/auth/claim', async (req, res) => {
   }
 });
 
-// DISCORD OAUTH CALLBACK (robusto: early-check -> token exchange -> user fetch -> mark used -> assign role)
 app.get('/discord/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     console.log('DEBUG /discord/callback params', { code: !!code, state: !!state });
     if (!code || !state) return res.status(400).send('Faltan parámetros (code o state).');
 
-    // Early check: is claim still valid?
     try {
       const { data: existingRows, error: exErr } = await supabase.from('memberships').select('id,used,revoked_at,discord_id,plan').eq('claim', state).limit(1);
       if (exErr) console.warn('Early claim check error:', exErr);
@@ -408,7 +408,6 @@ app.get('/discord/callback', async (req, res) => {
       console.warn('Error verificando claim antes de token exchange:', err);
     }
 
-    // Token exchange (single attempt, explicit handling)
     let tokenData = null;
     try {
       const params = new URLSearchParams({
@@ -449,7 +448,6 @@ app.get('/discord/callback', async (req, res) => {
       return res.status(500).send('Error interno durante intercambio de token. Revisa logs.');
     }
 
-    // Fetch user using access_token
     let userData = null;
     try {
       const userResp = await fetch('https://discord.com/api/users/@me', {
@@ -473,7 +471,6 @@ app.get('/discord/callback', async (req, res) => {
     const discordUsername = userData.username || discordId;
     console.log('OAuth user:', discordUsername, discordId);
 
-    // Try add to guild via OAuth add-member (best-effort)
     try {
       const putUrl = `https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`;
       const putBody = { access_token: tokenData.access_token };
@@ -489,7 +486,6 @@ app.get('/discord/callback', async (req, res) => {
       console.warn('Warning add-member via OAuth PUT failed', err);
     }
 
-    // Atomic update: set used=true, discord_id, redeemed_at, active=true (claim becomes single-use)
     let membership = null;
     try {
       const updates = { discord_id: discordId, discord_username: discordUsername, used: true, redeemed_at: new Date().toISOString(), active: true, updated_at: new Date().toISOString() };
@@ -505,7 +501,6 @@ app.get('/discord/callback', async (req, res) => {
       console.error('Exception updating membership in callback', err);
     }
 
-    // If membership not found by update, try fetching for plan info fallback
     if (!membership) {
       try {
         const { data: rows2 } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
@@ -513,7 +508,6 @@ app.get('/discord/callback', async (req, res) => {
       } catch (err) { console.warn('fetch membership fallback failed', err); }
     }
 
-    // Assign role according to plan (best-effort)
     try {
       const planOfUser = membership ? (membership.plan || membership.plan_id) : 'plan_mensual';
       const roleId = getRoleIdForPlan(planOfUser);
@@ -527,7 +521,6 @@ app.get('/discord/callback', async (req, res) => {
       console.error('Exception assigning role in callback', err);
     }
 
-    // Success page
     const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg';
     return res.send(`
       <!doctype html><html><head><meta charset="utf-8"><title>¡Bienvenido!</title></head>
@@ -545,7 +538,6 @@ app.get('/discord/callback', async (req, res) => {
   }
 });
 
-// ================= Expire memberships - quitar rol (no expulsar) y enviar email
 async function expireMemberships() {
   try {
     console.log('⏱️ Chequeando memberships expiradas...');
@@ -562,7 +554,6 @@ async function expireMemberships() {
         console.log('Processing expired membership:', m.id || m.claim, 'email:', m.email);
         const roleId = getRoleIdForPlan(m.plan || m.plan_id);
 
-        // Attempt to remove role (log failures)
         if (m.discord_id && roleId) {
           const removed = await removeDiscordRole(m.discord_id, roleId);
           if (removed) {
@@ -575,13 +566,11 @@ async function expireMemberships() {
           console.log('No discord_id or no roleId -> skip remove role');
         }
 
-        // Mark membership as revoked/ inactive
         const updates = { active: false, revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() };
         const { error: updErr } = await supabase.from('memberships').update(updates).eq('id', m.id);
         if (updErr) console.error('Error marking revoked', updErr);
         else console.log(`Membership ${m.id} marked revoked.`);
 
-        // Send expiry email (best effort)
         if (m.email) {
           await sendExpiryEmail(m).catch(e => console.error('sendExpiryEmail error', e));
         }
@@ -594,13 +583,11 @@ async function expireMemberships() {
   }
 }
 
-// start expire loop
 setTimeout(() => {
   expireMemberships().catch(err => console.error('expireMemberships startup error', err));
   setInterval(() => expireMemberships().catch(err => console.error('expireMemberships interval error', err)), 60*1000);
 }, 3000);
 
-// ================= verify bot token at startup
 async function verifyBotTokenAtStartup() {
   try {
     if (!DISCORD_BOT_TOKEN) { console.warn('No DISCORD_BOT_TOKEN'); return; }
@@ -617,7 +604,6 @@ async function verifyBotTokenAtStartup() {
 }
 verifyBotTokenAtStartup();
 
-// Start server
 app.listen(PORT, () => {
   console.log('🚀 NAZA Bot iniciado en puerto', PORT);
   console.log('🔔 Discord token presente?', !!DISCORD_BOT_TOKEN);
