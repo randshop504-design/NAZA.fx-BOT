@@ -1,20 +1,3 @@
-
-
-
-
-Pasted text(12).txt
-Documento
- En este código hay una función de core en donde yo mando un dimor y hace una cosa automática y todo lo demás, ¿verdad? Quiero preguntarte dos cosas. Número uno, si hay una función que mande el correo después de que se utiliza la función. Y una segunda es, por ejemplo, si yo quisiera agregarle un adjunto que mandara un dimor periódico al que ya tiene, solo que esta vez distinto, ¿entiendes? Distinto. Siempre con la misma que ustedes, con la misma imagen, pero que simplemente, simplemente manden chiperla al correo.     
-
-
-index_whop_email.js
-JavaScript
-
-Sí, ya vi el archivo que subiste. El endpoint /send-whop-email ya está agregado y la función sendWhopEmail() también está incluida en el archivo que subiste. 
-
-
-La ruta quedó así:
-
 app.post('/send-whop-email', async (req, res) => {
   try {
     if (!validatePasswordFromBody(req)) {
