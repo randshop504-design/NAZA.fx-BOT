@@ -212,7 +212,6 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
     if (error?.response?.body) console.error('SendGrid response body:', error.response.body);
     throw error;
   }
-}
  
 async function sendTrainingEmail(email, name) {
 
@@ -236,8 +235,6 @@ async function sendTrainingEmail(email, name) {
 
   console.log('✅ Training email enviado a:', email);
 }
- 
-// ================= Expiry email
 
 // ================= Expiry email (mejorado visualmente, usa mismos colores y logo que bienvenida)
 // Incluye CTA para volver a comprar en https://www.nazatradingacademy.com
