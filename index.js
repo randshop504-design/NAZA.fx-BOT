@@ -437,8 +437,7 @@ app.post('/send-training-email', async (req, res) => {
 
 });
 
-409 // create-membership
-410 app.post('/create-membership', async (req, res) => {
+
 // create-membership
 app.post('/create-membership', async (req, res) => {
   try {
