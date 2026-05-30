@@ -402,9 +402,48 @@ function getRoleIdForPlan(planId) {
 
 // ================= ROUTES
 
-// Health
-app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+405 // Health
+406 app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
+407
+408 app.post('/send-training-email', async (req, res) => {
+
+  try {
+
+    const { nombre, email } = req.body;
+
+    if (!nombre || !email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nombre y email requeridos'
+      });
+    }
+
+    await sendTrainingEmail(
+      email,
+      nombre
+    );
+
+    return res.json({
+      success: true,
+      message: 'Correo enviado correctamente'
+    });
+
+  } catch (err) {
+
+    console.error(err);
+
+    return res.status(500).json({
+      success: false,
+      message: 'Error enviando correo'
+    });
+
+  }
+
+});
+
+409 // create-membership
+410 app.post('/create-membership', async (req, res) => {
 // create-membership
 app.post('/create-membership', async (req, res) => {
   try {
