@@ -213,7 +213,6 @@ async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId,
     throw error;
   }
 }
-}
  
 async function sendTrainingEmail(email, name) {
 
@@ -239,7 +238,7 @@ async function sendTrainingEmail(email, name) {
 }
  
 // ================= Expiry email
-function buildExpiryEmailHtml(...)
+
 // ================= Expiry email (mejorado visualmente, usa mismos colores y logo que bienvenida)
 // Incluye CTA para volver a comprar en https://www.nazatradingacademy.com
 function buildExpiryEmailHtml({ name, planName, membershipId, email, reactivateUrl }) {
