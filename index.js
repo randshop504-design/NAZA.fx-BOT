@@ -672,7 +672,114 @@ async function verifyBotTokenAtStartup() {
   }
 }
 verifyBotTokenAtStartup();
+// ================= send-info-email (nueva ruta)
+function buildInfoEmailHtml({ name }) {
+  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
+<body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;">
+  <tr><td align="center" valign="top">
+    <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;">
+      <tr><td style="padding:0 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);">
 
+          <!-- HEADER -->
+          <tr><td style="padding:28px 24px 8px 24px;text-align:center;">
+            <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a);">
+              <img src="${logoPath}" alt="NAZA logo" width="96" height="96" style="display:block;width:96px;height:96px;object-fit:cover;transform:scale(1.12);border-radius:50%;" />
+            </div>
+            <h1 style="color:#ff9b3b;margin:18px 0 8px 0;font-size:26px;font-family:Arial,sans-serif;">NAZA Trading Academy</h1>
+            <div style="color:#cbd5e1;margin:6px 0 20px 0;font-size:16px;font-family:Arial,sans-serif;">¡Bienvenido! Tu compra fue procesada correctamente.</div>
+          </td></tr>
+
+          <!-- BODY -->
+          <tr><td style="padding:20px 28px 28px 28px;color:#d6e6f8;font-family:Arial,sans-serif;line-height:1.6;">
+
+            <div style="font-size:15px;margin-bottom:20px;">
+              <strong>Hola ${escapeHtml(name || 'usuario')},</strong><br/><br/>
+              ¡Bienvenido a NAZA Trading Academy!<br/>
+              Tu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.<br/><br/>
+              Antes de continuar, es importante que sigas los pasos en el siguiente orden:
+            </div>
+
+            <!-- Paso 1 -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 1: Crear tu cuenta de Discord</strong></p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Discord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.</p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Si todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:</p>
+              <a href="https://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo crear una cuenta de Discord</a>
+            </div>
+
+            <!-- Paso 2 -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 2: Aprender a utilizar Whop</strong></p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Whop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.</p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Una vez que tengas tu cuenta de Discord lista, mira el siguiente video para aprender cómo utilizar Whop correctamente:</p>
+              <a href="https://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo utilizar Whop</a>
+            </div>
+
+            <!-- Importante -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>⚠️ Importante</strong></p>
+              <p style="margin:0;color:#d6e6f8;font-size:14px;">No intentes acceder al servidor antes de completar estos pasos. Seguir el proceso correcto evitará errores y te permitirá recibir automáticamente los accesos correspondientes a tu membresía.</p>
+            </div>
+
+            <div style="font-size:14px;color:#d6e6f8;margin-top:4px;line-height:1.6;">
+              Una vez finalizados ambos pasos, podrás continuar con el proceso de activación y disfrutar de todos los beneficios de NAZA Trading Academy.<br/><br/>
+              Si necesitas ayuda, nuestro equipo de soporte estará disponible para asistirte.<br/><br/>
+              Nos vemos dentro de la comunidad.<br/>
+              <strong style="color:#ff9b3b;">NAZA Trading Academy</strong>
+            </div>
+
+          </td></tr>
+
+          <!-- FOOTER -->
+          <tr><td style="padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;">
+            <div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div>
+            <div style="margin-top:6px">Soporte: <a href="mailto:${SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${SUPPORT_EMAIL}</a></div>
+          </td></tr>
+
+        </table>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>`;
+}
+
+function buildInfoEmailText({ name }) {
+  return `Hola ${name || 'usuario'},\n\n¡Bienvenido a NAZA Trading Academy!\nTu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.\n\nAntes de continuar, es importante que sigas los pasos en el siguiente orden:\n\nPaso 1: Crear tu cuenta de Discord\nDiscord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.\nSi todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:\nhttps://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn\n\nPaso 2: Aprender a utilizar Whop\nWhop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.\nUna vez que tengas tu cuenta de Discord lista, mira el siguiente video:\nhttps://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX\n\n⚠️ Importante\nNo intentes acceder al servidor antes de completar estos pasos.\n\nUna vez finalizados ambos pasos, podrás continuar con el proceso de activación.\n\nNos vemos dentro de la comunidad.\nNAZA Trading Academy\nSoporte: ${SUPPORT_EMAIL}`;
+}
+
+app.post('/send-info-email', async (req, res) => {
+  try {
+    if (!validatePasswordFromBody(req)) return res.status(401).json({ success: false, message: 'password inválida' });
+
+    const body = req.body || {};
+    const email = (body.email || '').toString().trim().toLowerCase();
+    const name  = (body.nombre || body.name || '').toString().trim();
+
+    if (!email) return res.status(400).json({ success: false, message: 'Campo requerido: email' });
+    if (!SENDGRID_API_KEY) return res.status(500).json({ success: false, message: 'SENDGRID_API_KEY no configurada' });
+
+    const html = buildInfoEmailHtml({ name });
+    const text = buildInfoEmailText({ name });
+
+    await sgMail.send({
+      to: email,
+      from: FROM_EMAIL,
+      subject: '¡Bienvenido a NAZA Trading Academy! — Primeros pasos',
+      text,
+      html
+    });
+
+    console.log('✅ Info email enviado a:', email);
+    return res.json({ success: true, message: 'Email enviado correctamente' });
+  } catch (err) {
+    console.error('/send-info-email error', err?.response?.body || err);
+    return res.status(500).json({ success: false, message: 'Error enviando email' });
+  }
+});
 // Start server
 app.listen(PORT, () => {
   console.log('🚀 NAZA Bot iniciado en puerto', PORT);
