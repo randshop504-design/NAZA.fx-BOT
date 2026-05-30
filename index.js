@@ -401,12 +401,7 @@ function getRoleIdForPlan(planId) {
 }
 
 // ================= ROUTES
-
-405 // Health
-406 app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
-
-407
-408 app.post('/send-training-email', async (req, res) => {
+app.post('/send-training-email', async (req, res) => {
 
   try {
 
