@@ -1,4 +1,4 @@
-// index.js - NAZA Bot (final, mejorado)
+// index.js - NAZA Bot (final, mejorado + webhook de Whop)
 // Requisitos: Node >=18, @sendgrid/mail, @supabase/supabase-js, discord.js
 require('dotenv').config();
 const express = require('express');
@@ -9,7 +9,13 @@ const crypto = require('crypto');
 const fetch = global.fetch || (() => { try { return require('node-fetch'); } catch(e){ return null; } })();
 
 const app = express();
-app.use(express.json());
+
+// IMPORTANTE: capturamos el "raw body" (el texto crudo de la petición) porque
+// lo necesitamos para verificar la firma del webhook de Whop. Sin esto, la
+// verificación de firma no funcionaría.
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); }
+}));
 app.use(express.urlencoded({ extended: true }));
 
 // =================== CONFIG
@@ -28,8 +34,19 @@ const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD || process.env.ROL
 const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL || '';
 const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_MENSUAL || '';
 const FRONTEND_URL = process.env.FRONTEND_URL || '';
-// Default literal password requested by user; can be overridden by env
-const API_PASSWORD = process.env.API_PASSWORD || 'Alex13102001$$$';
+// La contraseña de la API ahora es OBLIGATORIA por variable de entorno.
+// Si no la configurás en Render, el bot se niega a arrancar (por seguridad).
+const API_PASSWORD = process.env.API_PASSWORD || '';
+if (!API_PASSWORD) {
+  console.error('❌ FATAL: API_PASSWORD no está configurada en las variables de entorno. El bot no puede arrancar así por seguridad.');
+  process.exit(1);
+}
+
+// Secreto del webhook de Whop (te lo da el dashboard de Whop al crear el webhook)
+const WHOP_WEBHOOK_SECRET = process.env.WHOP_WEBHOOK_SECRET || '';
+if (!WHOP_WEBHOOK_SECRET) {
+  console.warn('⚠️ WHOP_WEBHOOK_SECRET no definido. El endpoint /webhook/whop rechazará todas las peticiones hasta que lo configures.');
+}
 
 // Configure SendGrid
 if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
@@ -76,6 +93,7 @@ function maskedSecret(s) {
   return s.slice(0,2) + '...' + s.slice(-2);
 }
 console.log('🔐 API_PASSWORD (masked) =', maskedSecret(API_PASSWORD));
+console.log('🔐 WHOP_WEBHOOK_SECRET (masked) =', maskedSecret(WHOP_WEBHOOK_SECRET));
 console.log('🔔 DISCORD_BOT_TOKEN present?', !!DISCORD_BOT_TOKEN);
 
 // ================= Password validation (body OR header x-admin-key)
@@ -88,6 +106,51 @@ function validatePasswordFromBody(req) {
     return false;
   } catch (err) {
     console.warn('validatePasswordFromBody exception', err);
+    return false;
+  }
+}
+
+// ================= Verificación de la firma del webhook de Whop
+// Whop firma sus webhooks siguiendo el estándar "Standard Webhooks".
+// Manda 3 headers: webhook-id, webhook-timestamp y webhook-signature.
+// Recalculamos la firma con nuestro secreto y la comparamos con la que mandó Whop.
+function verifyWhopSignature(req) {
+  try {
+    const webhookId = req.headers['webhook-id'];
+    const webhookTimestamp = req.headers['webhook-timestamp'];
+    const webhookSignature = req.headers['webhook-signature'];
+    if (!webhookId || !webhookTimestamp || !webhookSignature || !WHOP_WEBHOOK_SECRET) return false;
+    if (!req.rawBody) return false;
+
+    const signedContent = `${webhookId}.${webhookTimestamp}.${req.rawBody}`;
+
+    // El secreto de Whop suele venir como "whsec_XXXXX" — quitamos el prefijo y decodificamos base64
+    const secretBase64 = WHOP_WEBHOOK_SECRET.replace(/^whsec_/, '');
+    const secretBytes = Buffer.from(secretBase64, 'base64');
+
+    const expectedSignature = crypto
+      .createHmac('sha256', secretBytes)
+      .update(signedContent)
+      .digest('base64');
+
+    // El header puede traer varias firmas separadas por espacio, formato "v1,firma v1,firma2..."
+    const signatures = String(webhookSignature)
+      .split(' ')
+      .map(s => s.split(',')[1])
+      .filter(Boolean);
+
+    return signatures.some(sig => {
+      try {
+        const a = Buffer.from(sig);
+        const b = Buffer.from(expectedSignature);
+        if (a.length !== b.length) return false;
+        return crypto.timingSafeEqual(a, b);
+      } catch {
+        return false;
+      }
+    });
+  } catch (err) {
+    console.error('verifyWhopSignature error', err);
     return false;
   }
 }
@@ -309,10 +372,140 @@ function getRoleIdForPlan(planId) {
   return mapping[key] && mapping[key].trim() !== '' ? mapping[key] : null;
 }
 
+// ================= Correo de "primeros pasos" (info)
+function buildInfoEmailHtml({ name }) {
+  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
+<body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;">
+  <tr><td align="center" valign="top">
+    <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;">
+      <tr><td style="padding:0 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);">
+
+          <!-- HEADER -->
+          <tr><td style="padding:28px 24px 8px 24px;text-align:center;">
+            <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a);">
+              <img src="${logoPath}" alt="NAZA logo" width="96" height="96" style="display:block;width:96px;height:96px;object-fit:cover;transform:scale(1.12);border-radius:50%;" />
+            </div>
+            <h1 style="color:#ff9b3b;margin:18px 0 8px 0;font-size:26px;font-family:Arial,sans-serif;">NAZA Trading Academy</h1>
+            <div style="color:#cbd5e1;margin:6px 0 20px 0;font-size:16px;font-family:Arial,sans-serif;">¡Bienvenido! Tu compra fue procesada correctamente.</div>
+          </td></tr>
+
+          <!-- BODY -->
+          <tr><td style="padding:20px 28px 28px 28px;color:#d6e6f8;font-family:Arial,sans-serif;line-height:1.6;">
+
+            <div style="font-size:15px;margin-bottom:20px;">
+              <strong>Hola ${escapeHtml(name || 'usuario')},</strong><br/><br/>
+              ¡Bienvenido a NAZA Trading Academy!<br/>
+              Tu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.<br/><br/>
+              Antes de continuar, es importante que sigas los pasos en el siguiente orden:
+            </div>
+
+            <!-- Paso 1 -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 1: Crear tu cuenta de Discord</strong></p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Discord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.</p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Si todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:</p>
+              <a href="https://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo crear una cuenta de Discord</a>
+            </div>
+
+            <!-- Paso 2 -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 2: Aprender a utilizar Whop</strong></p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Whop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.</p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Una vez que tengas tu cuenta de Discord lista, mira el siguiente video para aprender cómo utilizar Whop correctamente:</p>
+              <a href="https://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo utilizar Whop</a>
+            </div>
+
+            <!-- Importante -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>⚠️ Importante</strong></p>
+              <p style="margin:0;color:#d6e6f8;font-size:14px;">No intentes acceder al servidor antes de completar estos pasos. Seguir el proceso correcto evitará errores y te permitirá recibir automáticamente los accesos correspondientes a tu membresía.</p>
+            </div>
+
+            <div style="font-size:14px;color:#d6e6f8;margin-top:4px;line-height:1.6;">
+              Una vez finalizados ambos pasos, podrás continuar con el proceso de activación y disfrutar de todos los beneficios de NAZA Trading Academy.<br/><br/>
+              Si necesitas ayuda, nuestro equipo de soporte estará disponible para asistirte.<br/><br/>
+              Nos vemos dentro de la comunidad.<br/>
+              <strong style="color:#ff9b3b;">NAZA Trading Academy</strong>
+            </div>
+
+          </td></tr>
+
+          <!-- FOOTER -->
+          <tr><td style="padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;">
+            <div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div>
+            <div style="margin-top:6px">Soporte: <a href="mailto:${SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${SUPPORT_EMAIL}</a></div>
+          </td></tr>
+
+        </table>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>`;
+}
+
+function buildInfoEmailText({ name }) {
+  return `Hola ${name || 'usuario'},\n\n¡Bienvenido a NAZA Trading Academy!\nTu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.\n\nAntes de continuar, es importante que sigas los pasos en el siguiente orden:\n\nPaso 1: Crear tu cuenta de Discord\nDiscord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.\nSi todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:\nhttps://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn\n\nPaso 2: Aprender a utilizar Whop\nWhop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.\nUna vez que tengas tu cuenta de Discord lista, mira el siguiente video:\nhttps://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX\n\n⚠️ Importante\nNo intentes acceder al servidor antes de completar estos pasos.\n\nUna vez finalizados ambos pasos, podrás continuar con el proceso de activación.\n\nNos vemos dentro de la comunidad.\nNAZA Trading Academy\nSoporte: ${SUPPORT_EMAIL}`;
+}
+
+// Función reutilizable: la usan tanto la ruta manual /send-info-email
+// como el webhook automático /webhook/whop
+async function sendInfoEmail(email, name) {
+  if (!SENDGRID_API_KEY) throw new Error('SENDGRID_API_KEY no configurada');
+  const html = buildInfoEmailHtml({ name });
+  const text = buildInfoEmailText({ name });
+  await sgMail.send({
+    to: email,
+    from: FROM_EMAIL,
+    subject: '¡Bienvenido a NAZA Trading Academy! — Primeros pasos',
+    text,
+    html
+  });
+  console.log('✅ Info email enviado a:', email);
+}
+
 // ================= ROUTES
 
 // Health
 app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// ================= WEBHOOK DE WHOP (nuevo)
+// Whop llama automáticamente a esta URL cuando alguien paga.
+// Verificamos la firma para asegurarnos que es realmente Whop quien avisa,
+// y si el pago fue exitoso, mandamos el correo de "primeros pasos".
+app.post('/webhook/whop', async (req, res) => {
+  if (!verifyWhopSignature(req)) {
+    console.error('❌ Firma de webhook Whop inválida o WHOP_WEBHOOK_SECRET no configurado');
+    return res.status(400).send('invalid signature');
+  }
+
+  // Respondemos rápido; Whop espera un 2xx pronto. Procesamos después.
+  res.status(200).send('OK');
+
+  try {
+    const event = JSON.parse(req.rawBody);
+    console.log('📩 Webhook Whop recibido:', event.type);
+
+    if (event.type === 'payment.succeeded') {
+      const data = event.data || {};
+      const email = data.user?.email || null;
+      const name = data.user?.name || data.user?.username || 'usuario';
+
+      if (email) {
+        sendInfoEmail(email, name).catch(err => console.error('Error enviando info email (webhook whop):', err));
+      } else {
+        console.warn('⚠️ payment.succeeded sin email en el payload:', JSON.stringify(data));
+      }
+    } else {
+      console.log('Evento Whop ignorado (no es payment.succeeded):', event.type);
+    }
+  } catch (err) {
+    console.error('Error procesando evento de Whop:', err);
+  }
+});
 
 // create-membership
 app.post('/create-membership', async (req, res) => {
@@ -657,85 +850,7 @@ async function verifyBotTokenAtStartup() {
 }
 verifyBotTokenAtStartup();
 
-// ================= send-info-email
-function buildInfoEmailHtml({ name }) {
-  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
-<body style="margin:0;padding:0;background-color:#000000;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;">
-  <tr><td align="center" valign="top">
-    <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;">
-      <tr><td style="padding:0 16px;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);">
-
-          <!-- HEADER -->
-          <tr><td style="padding:28px 24px 8px 24px;text-align:center;">
-            <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a);">
-              <img src="${logoPath}" alt="NAZA logo" width="96" height="96" style="display:block;width:96px;height:96px;object-fit:cover;transform:scale(1.12);border-radius:50%;" />
-            </div>
-            <h1 style="color:#ff9b3b;margin:18px 0 8px 0;font-size:26px;font-family:Arial,sans-serif;">NAZA Trading Academy</h1>
-            <div style="color:#cbd5e1;margin:6px 0 20px 0;font-size:16px;font-family:Arial,sans-serif;">¡Bienvenido! Tu compra fue procesada correctamente.</div>
-          </td></tr>
-
-          <!-- BODY -->
-          <tr><td style="padding:20px 28px 28px 28px;color:#d6e6f8;font-family:Arial,sans-serif;line-height:1.6;">
-
-            <div style="font-size:15px;margin-bottom:20px;">
-              <strong>Hola ${escapeHtml(name || 'usuario')},</strong><br/><br/>
-              ¡Bienvenido a NAZA Trading Academy!<br/>
-              Tu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.<br/><br/>
-              Antes de continuar, es importante que sigas los pasos en el siguiente orden:
-            </div>
-
-            <!-- Paso 1 -->
-            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
-              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 1: Crear tu cuenta de Discord</strong></p>
-              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Discord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.</p>
-              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Si todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:</p>
-              <a href="https://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo crear una cuenta de Discord</a>
-            </div>
-
-            <!-- Paso 2 -->
-            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
-              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 2: Aprender a utilizar Whop</strong></p>
-              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Whop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.</p>
-              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Una vez que tengas tu cuenta de Discord lista, mira el siguiente video para aprender cómo utilizar Whop correctamente:</p>
-              <a href="https://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo utilizar Whop</a>
-            </div>
-
-            <!-- Importante -->
-            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
-              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>⚠️ Importante</strong></p>
-              <p style="margin:0;color:#d6e6f8;font-size:14px;">No intentes acceder al servidor antes de completar estos pasos. Seguir el proceso correcto evitará errores y te permitirá recibir automáticamente los accesos correspondientes a tu membresía.</p>
-            </div>
-
-            <div style="font-size:14px;color:#d6e6f8;margin-top:4px;line-height:1.6;">
-              Una vez finalizados ambos pasos, podrás continuar con el proceso de activación y disfrutar de todos los beneficios de NAZA Trading Academy.<br/><br/>
-              Si necesitas ayuda, nuestro equipo de soporte estará disponible para asistirte.<br/><br/>
-              Nos vemos dentro de la comunidad.<br/>
-              <strong style="color:#ff9b3b;">NAZA Trading Academy</strong>
-            </div>
-
-          </td></tr>
-
-          <!-- FOOTER -->
-          <tr><td style="padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;">
-            <div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div>
-            <div style="margin-top:6px">Soporte: <a href="mailto:${SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${SUPPORT_EMAIL}</a></div>
-          </td></tr>
-
-        </table>
-      </td></tr>
-    </table>
-  </td></tr>
-</table>
-</body></html>`;
-}
-
-function buildInfoEmailText({ name }) {
-  return `Hola ${name || 'usuario'},\n\n¡Bienvenido a NAZA Trading Academy!\nTu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.\n\nAntes de continuar, es importante que sigas los pasos en el siguiente orden:\n\nPaso 1: Crear tu cuenta de Discord\nDiscord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.\nSi todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:\nhttps://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn\n\nPaso 2: Aprender a utilizar Whop\nWhop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.\nUna vez que tengas tu cuenta de Discord lista, mira el siguiente video:\nhttps://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX\n\n⚠️ Importante\nNo intentes acceder al servidor antes de completar estos pasos.\n\nUna vez finalizados ambos pasos, podrás continuar con el proceso de activación.\n\nNos vemos dentro de la comunidad.\nNAZA Trading Academy\nSoporte: ${SUPPORT_EMAIL}`;
-}
-
+// Ruta manual (por si querés mandar el correo de info a mano alguna vez)
 app.post('/send-info-email', async (req, res) => {
   try {
     if (!validatePasswordFromBody(req)) return res.status(401).json({ success: false, message: 'password inválida' });
@@ -745,20 +860,8 @@ app.post('/send-info-email', async (req, res) => {
     const name  = (body.nombre || body.name || '').toString().trim();
 
     if (!email) return res.status(400).json({ success: false, message: 'Campo requerido: email' });
-    if (!SENDGRID_API_KEY) return res.status(500).json({ success: false, message: 'SENDGRID_API_KEY no configurada' });
 
-    const html = buildInfoEmailHtml({ name });
-    const text = buildInfoEmailText({ name });
-
-    await sgMail.send({
-      to: email,
-      from: FROM_EMAIL,
-      subject: '¡Bienvenido a NAZA Trading Academy! — Primeros pasos',
-      text,
-      html
-    });
-
-    console.log('✅ Info email enviado a:', email);
+    await sendInfoEmail(email, name);
     return res.json({ success: true, message: 'Email enviado correctamente' });
   } catch (err) {
     console.error('/send-info-email error', err?.response?.body || err);
