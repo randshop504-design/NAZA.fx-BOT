@@ -1,0 +1,1172 @@
+// index.js - NAZA Bot (final, mejorado + webhook de Whop)
+// Requisitos: Node >=18, @sendgrid/mail, @supabase/supabase-js, discord.js
+require('dotenv').config();
+const express = require('express');
+const { Client, GatewayIntentBits } = require('discord.js');
+const { createClient } = require('@supabase/supabase-js');
+const sgMail = require('@sendgrid/mail');
+const crypto = require('crypto');
+const fetch = global.fetch || (() => { try { return require('node-fetch'); } catch(e){ return null; } })();
+
+const app = express();
+
+// IMPORTANTE: capturamos el "raw body" (el texto crudo de la petición) porque
+// lo necesitamos para verificar la firma del webhook de Whop. Sin esto, la
+// verificación de firma no funcionaría.
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); }
+}));
+app.use(express.urlencoded({ extended: true }));
+
+// =================== CONFIG
+const PORT = process.env.PORT || 3000;
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE || '';
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || '';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'no-reply@nazatradingacademy.com';
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@nazatradingacademy.com';
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN || '';
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
+const DISCORD_REDIRECT_URL = process.env.DISCORD_REDIRECT_URL || '';
+const GUILD_ID = process.env.GUILD_ID || '';
+const ROLE_ID_ANUALDISCORD = process.env.ROLE_ID_ANUALDISCORD || process.env.ROLE_ID_ANUAL || '';
+const ROLE_ID_MENTORIADISCORD = process.env.ROLE_ID_MENTORIADISCORD || process.env.ROLE_ID_TRIMESTRAL || '';
+const ROLE_ID_SENALESDISCORD = process.env.ROLE_ID_SENALESDISCORD || process.env.ROLE_ID_MENSUAL || '';
+const FRONTEND_URL = process.env.FRONTEND_URL || '';
+// La contraseña de la API ahora es OBLIGATORIA por variable de entorno.
+// Si no la configurás en Render, el bot se niega a arrancar (por seguridad).
+const API_PASSWORD = process.env.API_PASSWORD || '';
+if (!API_PASSWORD) {
+  console.error('❌ FATAL: API_PASSWORD no está configurada en las variables de entorno. El bot no puede arrancar así por seguridad.');
+  process.exit(1);
+}
+
+// Secreto del webhook de Whop (te lo da el dashboard de Whop al crear el webhook)
+const WHOP_WEBHOOK_SECRET = process.env.WHOP_WEBHOOK_SECRET || '';
+if (!WHOP_WEBHOOK_SECRET) {
+  console.warn('⚠️ WHOP_WEBHOOK_SECRET no definido. El endpoint /webhook/whop rechazará todas las peticiones hasta que lo configures.');
+}
+
+// ============ PayPal ============
+// Credenciales de tu app REST en developer.paypal.com (Apps & Credentials)
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || '';
+// El ID del webhook (no el secreto) que te da PayPal al crear el webhook en el dashboard
+const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
+// Cambiá a https://api-m.sandbox.paypal.com si estás probando en modo sandbox
+const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.paypal.com';
+
+if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET || !PAYPAL_WEBHOOK_ID) {
+  console.warn('⚠️ Variables de PayPal incompletas (PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET/PAYPAL_WEBHOOK_ID). El endpoint /webhook/paypal rechazará todo hasta que las configures.');
+}
+
+// ============ Meta Conversions API (CAPI) ============
+// Pixel ID tomado de tu HTML (Meta Pixel Code). Podés sobreescribirlo por env var si algún día cambia.
+const META_PIXEL_ID = process.env.META_PIXEL_ID || '1589658092746278';
+// Token generado en Events Manager -> (tu pixel) -> Configuración -> API de conversiones -> Generar token de acceso
+const META_CAPI_ACCESS_TOKEN = process.env.META_CAPI_ACCESS_TOKEN || '';
+const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v20.0';
+if (!META_CAPI_ACCESS_TOKEN) {
+  console.warn('⚠️ META_CAPI_ACCESS_TOKEN no definido. No se enviarán eventos Purchase a Meta (CAPI).');
+}
+
+// Cuánto vale cada plan en PayPal — así distinguimos qué plan compraron
+// (PayPal no te dice "qué producto" fue, solo cuánto se cobró)
+const PAYPAL_PLAN_AMOUNTS = {
+  plan_semestral: 240.00, // 6 meses
+  plan_anual: 390.00      // 1 año
+};
+
+// Precio del plan mensual que se vende por Whop. Se usa como respaldo para
+// el evento Purchase de Meta si no se logra detectar el monto exacto dentro
+// del payload de Whop (mientras confirmamos el nombre real del campo con el
+// log de diagnóstico del webhook). Configurable por si el precio cambia.
+const WHOP_MENSUAL_PRICE = parseFloat(process.env.WHOP_MENSUAL_PRICE || '59.00');
+
+function getPaypalPlanByAmount(amount, currency) {
+  if (String(currency).toUpperCase() !== 'USD') return null;
+  for (const [plan, expected] of Object.entries(PAYPAL_PLAN_AMOUNTS)) {
+    if (Math.abs(amount - expected) < 0.01) return plan;
+  }
+  return null;
+}
+
+// Configure SendGrid
+if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
+else console.warn('⚠️ SENDGRID_API_KEY no definido. No se enviarán correos.');
+
+// Supabase client (service role)
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+  console.warn('⚠️ SUPABASE variables no encontradas. DB ops fallarán.');
+}
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, {
+  global: {
+    headers: {
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      apikey: SUPABASE_SERVICE_ROLE
+    }
+  }
+});
+
+// Discord client
+const discordClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+if (DISCORD_BOT_TOKEN) {
+  discordClient.login(DISCORD_BOT_TOKEN).catch(err => console.error('Error login Discord:', err));
+} else {
+  console.warn('⚠️ DISCORD_BOT_TOKEN no definido. Operaciones de rol fallarán si se intentan.');
+}
+discordClient.once('ready', () => {
+  console.log('✅ Discord listo:', discordClient.user?.tag || '(sin tag aún)');
+});
+
+// Utilities
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+function emailSafe(e){ return e || ''; }
+function maskedSecret(s) {
+  if (!s) return '(empty)';
+  if (s.length <= 6) return '******';
+  return s.slice(0,2) + '...' + s.slice(-2);
+}
+console.log('🔐 API_PASSWORD (masked) =', maskedSecret(API_PASSWORD));
+console.log('🔐 WHOP_WEBHOOK_SECRET (masked) =', maskedSecret(WHOP_WEBHOOK_SECRET));
+console.log('🔐 META_CAPI_ACCESS_TOKEN (masked) =', maskedSecret(META_CAPI_ACCESS_TOKEN));
+console.log('🔔 DISCORD_BOT_TOKEN present?', !!DISCORD_BOT_TOKEN);
+
+// ================= Password validation (body OR header x-admin-key)
+function validatePasswordFromBody(req) {
+  try {
+    const sentBody = (req.body && req.body.password) ? String(req.body.password) : '';
+    const sentHeader = req.headers && (req.headers['x-admin-key'] || req.headers['x-admin_key'] || req.headers['x-adminkey']) ? String(req.headers['x-admin-key'] || req.headers['x-admin_key'] || req.headers['x-adminkey']) : '';
+    if (sentBody && sentBody === API_PASSWORD) return true;
+    if (sentHeader && sentHeader === API_PASSWORD) return true;
+    return false;
+  } catch (err) {
+    console.warn('validatePasswordFromBody exception', err);
+    return false;
+  }
+}
+
+// ================= Verificación de la firma del webhook de Whop
+// Whop firma sus webhooks siguiendo el estándar "Standard Webhooks".
+// Manda 3 headers: webhook-id, webhook-timestamp y webhook-signature.
+// Recalculamos la firma con nuestro secreto y la comparamos con la que mandó Whop.
+function verifyWhopSignature(req) {
+  try {
+    const webhookId = req.headers['webhook-id'];
+    const webhookTimestamp = req.headers['webhook-timestamp'];
+    const webhookSignature = req.headers['webhook-signature'];
+    if (!webhookId || !webhookTimestamp || !webhookSignature || !WHOP_WEBHOOK_SECRET) return false;
+    if (!req.rawBody) return false;
+
+    const signedContent = `${webhookId}.${webhookTimestamp}.${req.rawBody}`;
+
+    // El secreto de Whop suele venir como "whsec_XXXXX" — quitamos el prefijo y decodificamos base64
+    const secretBase64 = WHOP_WEBHOOK_SECRET.replace(/^whsec_/, '');
+    const secretBytes = Buffer.from(secretBase64, 'base64');
+
+    const expectedSignature = crypto
+      .createHmac('sha256', secretBytes)
+      .update(signedContent)
+      .digest('base64');
+
+    // El header puede traer varias firmas separadas por espacio, formato "v1,firma v1,firma2..."
+    const signatures = String(webhookSignature)
+      .split(' ')
+      .map(s => s.split(',')[1])
+      .filter(Boolean);
+
+    return signatures.some(sig => {
+      try {
+        const a = Buffer.from(sig);
+        const b = Buffer.from(expectedSignature);
+        if (a.length !== b.length) return false;
+        return crypto.timingSafeEqual(a, b);
+      } catch {
+        return false;
+      }
+    });
+  } catch (err) {
+    console.error('verifyWhopSignature error', err);
+    return false;
+  }
+}
+
+// ================= Verificación del webhook de PayPal
+// A diferencia de Whop, PayPal no se verifica con matemática local: hay que
+// pedirle un token de acceso (con tu Client ID/Secret) y después preguntarle
+// a su propia API si la firma es válida.
+let paypalAccessTokenCache = { token: null, expiresAt: 0 };
+
+async function getPaypalAccessToken() {
+  const now = Date.now();
+  if (paypalAccessTokenCache.token && now < paypalAccessTokenCache.expiresAt) {
+    return paypalAccessTokenCache.token;
+  }
+  const basicAuth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64');
+  const resp = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${basicAuth}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: 'grant_type=client_credentials'
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.access_token) {
+    throw new Error('No se pudo obtener token de acceso de PayPal: ' + JSON.stringify(data));
+  }
+  paypalAccessTokenCache = {
+    token: data.access_token,
+    // renovamos 60s antes de que expire, por si acaso
+    expiresAt: now + (data.expires_in ? (data.expires_in - 60) * 1000 : 5 * 60 * 1000)
+  };
+  return data.access_token;
+}
+
+async function verifyPaypalWebhookSignature(req, event, accessToken) {
+  try {
+    const body = {
+      auth_algo: req.headers['paypal-auth-algo'],
+      cert_url: req.headers['paypal-cert-url'],
+      transmission_id: req.headers['paypal-transmission-id'],
+      transmission_sig: req.headers['paypal-transmission-sig'],
+      transmission_time: req.headers['paypal-transmission-time'],
+      webhook_id: PAYPAL_WEBHOOK_ID,
+      webhook_event: event
+    };
+    const resp = await fetch(`${PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error('verify-webhook-signature respondió error:', resp.status, JSON.stringify(data));
+      return false;
+    }
+    return data.verification_status === 'SUCCESS';
+  } catch (err) {
+    console.error('verifyPaypalWebhookSignature error', err);
+    return false;
+  }
+}
+
+// ================= Meta Conversions API (Purchase server-side)
+// Con esto le avisamos a Meta, desde el servidor, que una compra se completó
+// de verdad (a diferencia del pixel del navegador, que nunca ve el pago porque
+// ocurre en Whop o PayPal, fuera de tu sitio).
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value).trim().toLowerCase()).digest('hex');
+}
+
+async function sendMetaPurchaseEvent({ email, value, currency = 'USD', eventId, contentName, sourceUrl }) {
+  if (!META_CAPI_ACCESS_TOKEN) {
+    console.warn('⚠️ sendMetaPurchaseEvent: no hay META_CAPI_ACCESS_TOKEN, se omite el envío a Meta.');
+    return false;
+  }
+  try {
+    const userData = {};
+    if (email) userData.em = [sha256Hex(email)];
+
+    const eventPayload = {
+      data: [
+        {
+          event_name: 'Purchase',
+          event_time: Math.floor(Date.now() / 1000),
+          event_id: eventId || crypto.randomUUID(), // evita duplicados si algún día también se dispara desde el navegador
+          action_source: 'website',
+          event_source_url: sourceUrl || FRONTEND_URL || 'https://nazatradingacademy.com',
+          user_data: userData,
+          custom_data: {
+            currency: currency,
+            value: Number(value) || 0,
+            content_name: contentName || undefined
+          }
+        }
+      ]
+    };
+
+    const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${META_PIXEL_ID}/events?access_token=${encodeURIComponent(META_CAPI_ACCESS_TOKEN)}`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(eventPayload)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error('❌ Meta CAPI Purchase rechazado:', resp.status, JSON.stringify(data));
+      return false;
+    }
+    console.log('✅ Meta CAPI Purchase enviado:', JSON.stringify(data));
+    return true;
+  } catch (err) {
+    console.error('❌ Error enviando Purchase a Meta CAPI:', err);
+    return false;
+  }
+}
+
+// ================= Email templates
+function buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail, token }) {
+  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="color-scheme" content="dark light"><meta name="supported-color-schemes" content="dark light"><style>@media (prefers-color-scheme: dark) { .wrap { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important; } }</style></head><body style="margin:0;padding:0;background-color:#000000;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;"><tr><td align="center" valign="top"><table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;"><tr><td style="padding:0 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);"><tr><td style="padding:28px 24px 8px 24px;text-align:center;"><div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a);"><img src="${logoPath}" alt="NAZA logo" width="96" height="96" style="display:block;width:96px;height:96px;object-fit:cover;transform:scale(1.12);border-radius:50%;" /></div><h1 style="color:#ff9b3b;margin:18px 0 8px 0;font-size:26px;font-family:Arial,sans-serif;">NAZA Trading Academy</h1><div style="color:#cbd5e1;margin:6px 0 20px 0;font-size:16px;font-family:Arial,sans-serif;">¡Bienvenido! Tu suscripción ha sido activada correctamente.</div></td></tr><tr><td style="padding:20px 28px 28px 28px;color:#d6e6f8;font-family:Arial,sans-serif;line-height:1.5;"><div style="font-size:15px;margin-bottom:16px;"><strong>Hola ${escapeHtml(name || 'usuario')},</strong></div><div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:0;"><p style="margin:0 0 10px 0;"><strong>Entrega del servicio</strong></p><p style="margin:0;color:#d6e6f8">Todos los privilegios de tu plan —cursos, clases en vivo, análisis exclusivos y canales privados— se gestionan dentro de <strong>Discord</strong>. Al pulsar <em>Obtener acceso</em> recibirás el rol correspondiente y se te desbloquearán automáticamente los canales de tu plan.</p></div><div style="text-align:center;margin:22px 0;"><a href="${claimUrl}" data-token="${encodeURIComponent(token)}" style="display:inline-block;background:#2d9bf0;color:#ffffff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(45,155,240,0.15);font-family:Arial,sans-serif;">Obtener acceso</a><div style="color:#9fb0c9;font-size:13px;margin-top:8px;font-family:Arial,sans-serif;">(En caso de no haber reclamado)</div></div><div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:18px;"><p style="margin:0 0 8px 0;"><strong>Únete a la comunidad y mantente al día</strong></p><p style="margin:0 0 12px 0;color:#d6e6f8">Para ver anuncios oficiales, horarios de clases, avisos de sesiones en vivo y formar parte de los chats (WhatsApp y Telegram), visita nuestro sitio y sigue las instrucciones para unirte a los grupos desde allí.</p><a href="https://nazatradingacademy.com" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:14px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;">https://nazatradingacademy.com</a></div><div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:18px;"><p style="margin:0 0 8px 0;"><strong>¿Nuevo en Discord o no tienes cuenta?</strong></p><p style="margin:0 0 12px 0;color:#d6e6f8">Si necesitas ayuda, usa los enlaces de abajo:</p><a href="https://discord.com/download" target="_blank" style="display:inline-block;padding:10px 16px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);margin-right:12px;text-decoration:none;color:#d6e6f8;font-weight:600;background:transparent;font-family:Arial,sans-serif;">Descargar Discord</a><a href="https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr" target="_blank" style="display:inline-block;padding:10px 16px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);text-decoration:none;color:#d6e6f8;font-weight:600;background:transparent;font-family:Arial,sans-serif;">Cómo crear una cuenta (ES)</a></div><div style="font-size:13px;color:#9fb0c9;margin-top:12px;font-family:Arial,sans-serif;"><div><strong>Detalles de la suscripción:</strong></div><div style="margin-top:6px;">Plan: ${escapeHtml(planName)}</div><div>ID de suscripción: ${escapeHtml(subscriptionId || '')}</div><div>Email: ${escapeHtml(emailSafe(email) || '')}</div><div style="margin-top:6px;font-size:12px;color:#8fa6bf">El enlace es de un solo uso y funciona hasta que completes el registro en Discord. Si ya inicias sesión con OAuth2, no es necesario volver a usarlo.</div></div></td></tr><tr><td style="padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;"><div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: <a href="mailto:${SUPPORT_EMAIL || 'support@nazatradingacademy.com'}" style="color:#bfe0ff;text-decoration:none">${SUPPORT_EMAIL || 'support@nazatradingacademy.com'}</a></div></td></tr></table></td></tr></table></td></tr></table></body></html>`;
+}
+
+function buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail, email, token }) {
+  return `Hola ${name || 'usuario'}, ¡Bienvenido a NAZA Trading Academy!\n\nTu suscripción ha sido activada correctamente.\n\nEntrega del servicio:\nTodos los privilegios de tu plan —cursos, clases en vivo, análisis y canales exclusivos— se entregan a través de Discord. Al pulsar "Obtener acceso" se te asignará automáticamente el rol correspondiente y se desbloquearán los canales de tu plan.\n\nÚnete a la comunidad:\nPara anuncios oficiales, horarios de clases y unirte a los chats (WhatsApp y Telegram), visita: https://nazatradingacademy.com\n\nSi no tienes Discord:\n- Descargar Discord: https://discord.com/download\n- Cómo crear una cuenta (ES): https://youtu.be/-qgmEy1XjMg?si=vqXGRkIid-kgTCTr\n\nEnlace para obtener acceso (un solo uso — válido hasta completar registro):\n${claimUrl}\n\nDetalles:\nPlan: ${planName}\nID de suscripción: ${subscriptionId || ''}\nEmail: ${email || ''}\n\nSoporte: ${SUPPORT_EMAIL || 'support@nazatradingacademy.com'}\n\nNota: El enlace es de un solo uso y funcionará hasta que completes el proceso en Discord.`;
+}
+
+async function sendWelcomeEmail(email, name, planId, subscriptionId, customerId, extra = {}, existingToken = null) {
+  console.log('📧 Enviando email de bienvenida (SendGrid)...');
+  const planNames = {
+    'plan_anual':      'Plan Anual 🔥',
+    'plan_trimestral': 'Plan Trimestral 📈',
+    'plan_semestral':  'Plan Semestral 📈',
+    'plan_mensual':    'Plan Mensual 💼'
+  };
+  const planName = planNames[planId] || planId || 'Plan';
+
+  if (!SENDGRID_API_KEY) {
+    console.error('❌ No hay SENDGRID_API_KEY configurada. Abortando envío de correo.');
+    throw new Error('SENDGRID_API_KEY no configurada');
+  }
+
+  let token = existingToken || crypto.randomBytes(24).toString('hex');
+
+  const claimUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URL)}&response_type=code&scope=identify%20guilds.join&state=${encodeURIComponent(token)}`;
+
+  const html = buildWelcomeEmailHtml({ name, planName, subscriptionId, claimUrl, email, supportEmail: SUPPORT_EMAIL, token });
+  const text = buildWelcomeText({ name, planName, subscriptionId, claimUrl, supportEmail: SUPPORT_EMAIL, email, token });
+
+  const msg = {
+    to: email,
+    from: FROM_EMAIL,
+    subject: `¡Bienvenido a NAZA Trading Academy! — Obtener acceso`,
+    text,
+    html
+  };
+
+  try {
+    console.log('DEBUG sendWelcomeEmail -> token:', token);
+    console.log('DEBUG sendWelcomeEmail -> claimUrl:', claimUrl);
+    const result = await sgMail.send(msg);
+    console.log('✅ Email enviado a:', email, 'SendGrid result:', result?.[0]?.statusCode || 'unknown');
+    return token;
+  } catch (error) {
+    console.error('❌ Error enviando email con SendGrid:', error?.message || error);
+    if (error?.response?.body) console.error('SendGrid response body:', error.response.body);
+    throw error;
+  }
+}
+
+// ================= Expiry email
+function buildExpiryEmailHtml({ name, planName, membershipId, email, reactivateUrl }) {
+  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+  const siteUrl = FRONTEND_URL || 'https://www.nazatradingacademy.com';
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>body{margin:0;padding:0;background:#000;color:#fff;font-family:Arial,sans-serif}a{color:#bfe0ff}</style></head><body style="background:#000;padding:24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table width="680" style="max-width:680px;width:100%;margin:0 auto;"><tr><td style="padding:0 16px;"><table style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);width:100%"><tr><td style="padding:28px 24px 8px 24px;text-align:center;"><div style="width:84px;height:84px;border-radius:50%;overflow:hidden;margin:0 auto;border:3px solid rgba(255,255,255,0.03);background:linear-gradient(135deg,#0f1720,#08101a)"><img src="${logoPath}" alt="NAZA logo" width="84" height="84" style="width:84px;height:84px;object-fit:cover;border-radius:50%"></div><h2 style="color:#ff9b3b;margin:16px 0 8px 0;font-size:22px">Tu acceso ha expirado</h2><div style="color:#cbd5e1;font-size:15px">Hola ${escapeHtml(name || 'usuario')},</div></td></tr><tr><td style="padding:18px 28px 24px 28px;color:#d6e6f8;font-size:15px;line-height:1.5"><p style="margin:0 0 12px 0;">Tu suscripción <strong>${escapeHtml(planName || '')}</strong> (ID: ${escapeHtml(membershipId || '')}) asociada a <strong>${escapeHtml(email || '')}</strong> ha expirado y los permisos en Discord fueron removidos.</p><p style="margin:0 0 12px 0;">Si deseas volver a acceder a los contenidos y canales privados, puedes renovar tu suscripción o comprar otra vez desde nuestra web. Haciendo clic en <strong>Reactivar mi acceso</strong> te llevamos al formulario para reactivar o adquirir un nuevo plan.</p><div style="text-align:center;margin:18px 0;"><a href="${reactivateUrl}" style="display:inline-block;background:#2d9bf0;color:#ffffff;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:700;box-shadow:0 8px 30px rgba(45,155,240,0.15);">Reactivar mi acceso</a></div><div style="background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));padding:14px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-top:6px;"><p style="margin:6px 0 8px 0;font-weight:600;color:#bfe0ff">¿Quieres comprar otra vez?</p><p style="margin:0 0 8px 0;color:#d6e6f8">Visita <a href="${siteUrl}" target="_blank">${siteUrl}</a> y elige el plan que más te convenga. Si necesitas ayuda con el proceso de compra, escríbenos a <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p></div></td></tr><tr><td style="padding:16px 18px 20px 18px;text-align:center;color:#98b0c8;font-size:13px;border-top:1px solid rgba(255,255,255,0.02)"><div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div><div style="margin-top:6px">Soporte: <a href="mailto:${SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${SUPPORT_EMAIL}</a></div></td></tr></table></td></tr></table></td></tr></table></body></html>`;
+}
+
+function buildExpiryEmailText({ name, planName, membershipId, email, reactivateUrl }) {
+  const siteUrl = FRONTEND_URL || 'https://www.nazatradingacademy.com';
+  return `Hola ${name || 'usuario'},\n\nTu suscripción ${planName} (ID: ${membershipId || ''}) asociada a ${email || ''} ha expirado y tus permisos en Discord fueron revocados.\n\nPara reactivar tu acceso o comprar un nuevo plan visita: ${reactivateUrl}\n\nTambién puedes entrar a ${siteUrl} para ver los planes disponibles.\n\nSi necesitas ayuda: ${SUPPORT_EMAIL}\n\n— NAZA Trading Academy`;
+}
+
+async function sendExpiryEmail(membership) {
+  if (!SENDGRID_API_KEY) {
+    console.warn('No SENDGRID -> no se enviará expiry email.');
+    return false;
+  }
+  try {
+    const planNames = {
+      'plan_anual':      'Plan Anual',
+      'plan_trimestral': 'Plan Trimestral',
+      'plan_semestral':  'Plan Semestral',
+      'plan_mensual':    'Plan Mensual'
+    };
+    const planName = planNames[membership.plan] || membership.plan || 'Plan';
+    const reactivateUrl = FRONTEND_URL ? `${FRONTEND_URL}/reactivar?membership=${encodeURIComponent(membership.id)}&email=${encodeURIComponent(membership.email)}` : `https://www.nazatradingacademy.com`;
+    const html = buildExpiryEmailHtml({ name: membership.name, planName, membershipId: membership.id, email: membership.email, reactivateUrl });
+    const text = buildExpiryEmailText({ name: membership.name, planName, membershipId: membership.id, email: membership.email, reactivateUrl });
+    const msg = { to: membership.email, from: FROM_EMAIL, subject: `Tu acceso a NAZA ha expirado — reactivá o compra otro plan`, text, html };
+    await sgMail.send(msg);
+    console.log('✅ Expiry email enviado a', membership.email);
+    return true;
+  } catch (err) {
+    console.error('Error enviando expiry email:', err);
+    return false;
+  }
+}
+
+// ================= Role helpers
+async function addRoleToMemberViaApi(discordId, roleId) {
+  if (!discordId || !roleId || !GUILD_ID || !DISCORD_BOT_TOKEN) return false;
+  try {
+    const url = `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${discordId}/roles/${roleId}`;
+    const resp = await fetch(url, { method: 'PUT', headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type':'application/json' } });
+    const status = resp ? resp.status : 'no-response';
+    const text = await resp.text().catch(()=>'<no-body>');
+    console.log(`DEBUG addRoleToMemberViaApi status=${status} body=${String(text).substring(0,400)}`);
+    return resp && resp.status === 204;
+  } catch (err) {
+    console.error('addRoleToMemberViaApi error', err);
+    return false;
+  }
+}
+
+async function removeRoleFromMemberViaApi(discordId, roleId) {
+  if (!discordId || !roleId || !GUILD_ID || !DISCORD_BOT_TOKEN) return false;
+  try {
+    const url = `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${discordId}/roles/${roleId}`;
+    const resp = await fetch(url, { method: 'DELETE', headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } });
+    const status = resp ? resp.status : 'no-response';
+    const text = await resp.text().catch(()=>'<no-body>');
+    console.log(`DEBUG removeRoleFromMemberViaApi status=${status} body=${String(text).substring(0,400)}`);
+    return resp && resp.status === 204;
+  } catch (err) {
+    console.error('removeRoleFromMemberViaApi error', err);
+    return false;
+  }
+}
+
+async function assignDiscordRole(discordId, roleId) {
+  if (!discordId || !roleId) return false;
+  try {
+    const okApi = await addRoleToMemberViaApi(discordId, roleId);
+    if (okApi) {
+      console.log('assignDiscordRole -> added via API');
+      return true;
+    }
+  } catch(e) { console.warn('assignDiscordRole api err', e); }
+
+  try {
+    const guild = await discordClient.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(discordId);
+    await member.roles.add(roleId);
+    console.log('assignDiscordRole -> added via discord.js fallback');
+    return true;
+  } catch (err) {
+    console.error('assignDiscordRole fallback error', err);
+    return false;
+  }
+}
+
+async function removeDiscordRole(discordId, roleId) {
+  if (!discordId || !roleId) return false;
+  try {
+    const okApi = await removeRoleFromMemberViaApi(discordId, roleId);
+    if (okApi) {
+      console.log('removeDiscordRole -> removed via API');
+      return true;
+    }
+  } catch (e) { console.warn('removeDiscordRole api attempt err', e); }
+
+  try {
+    const guild = await discordClient.guilds.fetch(GUILD_ID);
+    if (!guild) return false;
+    let member;
+    try { member = await guild.members.fetch(discordId); } catch (fetchErr) { console.warn('No member to fetch (maybe left) ', fetchErr?.message || fetchErr); return false; }
+    const botMember = await guild.members.fetch(discordClient.user?.id);
+    const botMaxPos = Math.max(...botMember.roles.cache.map(r => r.position), 0);
+    const targetRole = guild.roles.cache.get(roleId);
+    const targetPos = targetRole ? targetRole.position : null;
+    if (targetPos !== null && botMaxPos <= targetPos) {
+      console.error('Bot hierarchy insufficient to remove role (botMaxPos <= targetPos)');
+      return false;
+    }
+    try {
+      await member.roles.remove(roleId);
+      console.log('removeDiscordRole -> removed via discord.js fallback');
+      return true;
+    } catch (err) {
+      console.error('Error removing role via discord.js', err);
+      return false;
+    }
+  } catch (err) {
+    console.error('removeDiscordRole fallback overall error', err);
+    return false;
+  }
+}
+
+async function markRoleRemovedInDB(id) {
+  try {
+    const { error } = await supabase.from('memberships').update({ role_removed: true, updated_at: new Date().toISOString() }).eq('id', id);
+    if (error) console.warn('markRoleRemovedInDB error', error);
+    return !error;
+  } catch (err) {
+    console.error('markRoleRemovedInDB exception', err);
+    return false;
+  }
+}
+
+// ================= Expiry / roles mapping
+function calculateExpiryDate(plan) {
+  const now = new Date();
+  let days = 30;
+  if (plan === 'plan_trimestral' || plan === 'trimestral') days = 90;
+  if (plan === 'plan_semestral'  || plan === 'semestral')  days = 180;
+  if (plan === 'plan_anual'      || plan === 'anual')      days = 365;
+  return new Date(now.getTime() + days * 24*60*60*1000).toISOString();
+}
+
+function getRoleIdForPlan(planId) {
+  const key = String(planId || '').toLowerCase().trim();
+  const mapping = {
+    'plan_mensual':    ROLE_ID_SENALESDISCORD,
+    'mensual':         ROLE_ID_SENALESDISCORD,
+    'plan_trimestral': ROLE_ID_MENTORIADISCORD,
+    'trimestral':      ROLE_ID_MENTORIADISCORD,
+    'plan_semestral':  ROLE_ID_MENTORIADISCORD,
+    'semestral':       ROLE_ID_MENTORIADISCORD,
+    'plan_anual':      ROLE_ID_ANUALDISCORD,
+    'anual':           ROLE_ID_ANUALDISCORD
+  };
+  return mapping[key] && mapping[key].trim() !== '' ? mapping[key] : null;
+}
+
+// ================= Correo de "primeros pasos" (info)
+function buildInfoEmailHtml({ name }) {
+  const logoPath = 'https://vwndjpylfcekjmluookj.supabase.co/storage/v1/object/public/assets/0944255a-e933-4527-9aa5-f9e18e862a00.jpg';
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
+<body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;width:100%;min-width:100%;margin:0;padding:24px 0;">
+  <tr><td align="center" valign="top">
+    <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:680px;margin:0 auto;">
+      <tr><td style="padding:0 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-radius:12px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03);">
+
+          <!-- HEADER -->
+          <tr><td style="padding:28px 24px 8px 24px;text-align:center;">
+            <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;margin:0 auto;display:block;border:4px solid rgba(255,255,255,0.04);box-shadow:0 8px 30px rgba(2,6,23,0.6);background:linear-gradient(135deg,#0f1720,#08101a);">
+              <img src="${logoPath}" alt="NAZA logo" width="96" height="96" style="display:block;width:96px;height:96px;object-fit:cover;transform:scale(1.12);border-radius:50%;" />
+            </div>
+            <h1 style="color:#ff9b3b;margin:18px 0 8px 0;font-size:26px;font-family:Arial,sans-serif;">NAZA Trading Academy</h1>
+            <div style="color:#cbd5e1;margin:6px 0 20px 0;font-size:16px;font-family:Arial,sans-serif;">¡Bienvenido! Tu compra fue procesada correctamente.</div>
+          </td></tr>
+
+          <!-- BODY -->
+          <tr><td style="padding:20px 28px 28px 28px;color:#d6e6f8;font-family:Arial,sans-serif;line-height:1.6;">
+
+            <div style="font-size:15px;margin-bottom:20px;">
+              <strong>Hola ${escapeHtml(name || 'usuario')},</strong><br/><br/>
+              ¡Bienvenido a NAZA Trading Academy!<br/>
+              Tu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.<br/><br/>
+              Antes de continuar, es importante que sigas los pasos en el siguiente orden:
+            </div>
+
+            <!-- Paso 1 -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 1: Crear tu cuenta de Discord</strong></p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Discord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.</p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Si todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:</p>
+              <a href="https://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo crear una cuenta de Discord</a>
+            </div>
+
+            <!-- Paso 2 -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>Paso 2: Aprender a utilizar Whop</strong></p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Whop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.</p>
+              <p style="margin:0 0 10px 0;color:#d6e6f8;font-size:14px;">Una vez que tengas tu cuenta de Discord lista, mira el siguiente video para aprender cómo utilizar Whop correctamente:</p>
+              <a href="https://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX" target="_blank" style="display:block;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;color:#bfe0ff;text-decoration:none;font-weight:600;border:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;font-size:14px;">▶ Ver video: Cómo utilizar Whop</a>
+            </div>
+
+            <!-- Importante -->
+            <div style="background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));padding:18px;border-radius:10px;border:1px solid rgba(255,255,255,0.02);margin-bottom:16px;">
+              <p style="margin:0 0 8px 0;color:#ff9b3b;font-size:15px;"><strong>⚠️ Importante</strong></p>
+              <p style="margin:0;color:#d6e6f8;font-size:14px;">No intentes acceder al servidor antes de completar estos pasos. Seguir el proceso correcto evitará errores y te permitirá recibir automáticamente los accesos correspondientes a tu membresía.</p>
+            </div>
+
+            <div style="font-size:14px;color:#d6e6f8;margin-top:4px;line-height:1.6;">
+              Una vez finalizados ambos pasos, podrás continuar con el proceso de activación y disfrutar de todos los beneficios de NAZA Trading Academy.<br/><br/>
+              Si necesitas ayuda, nuestro equipo de soporte estará disponible para asistirte.<br/><br/>
+              Nos vemos dentro de la comunidad.<br/>
+              <strong style="color:#ff9b3b;">NAZA Trading Academy</strong>
+            </div>
+
+          </td></tr>
+
+          <!-- FOOTER -->
+          <tr><td style="padding:18px;text-align:center;color:#98b0c8;font-size:13px;background:transparent;border-top:1px solid rgba(255,255,255,0.02);font-family:Arial,sans-serif;">
+            <div>©️ ${new Date().getFullYear()} NAZA Trading Academy</div>
+            <div style="margin-top:6px">Soporte: <a href="mailto:${SUPPORT_EMAIL}" style="color:#bfe0ff;text-decoration:none">${SUPPORT_EMAIL}</a></div>
+          </td></tr>
+
+        </table>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>`;
+}
+
+function buildInfoEmailText({ name }) {
+  return `Hola ${name || 'usuario'},\n\n¡Bienvenido a NAZA Trading Academy!\nTu compra fue procesada correctamente y ya estás a pocos pasos de obtener acceso completo a todos los beneficios de tu membresía.\n\nAntes de continuar, es importante que sigas los pasos en el siguiente orden:\n\nPaso 1: Crear tu cuenta de Discord\nDiscord es la plataforma donde recibirás acceso a los canales privados, análisis de mercado, clases en vivo y todo el contenido exclusivo de tu plan.\nSi todavía no tienes una cuenta de Discord, mira este video y sigue las instrucciones:\nhttps://youtu.be/8JWq4zbffHY?si=lkcqrNuJBlJxQWfn\n\nPaso 2: Aprender a utilizar Whop\nWhop es la plataforma que utilizamos para administrar accesos, pagos, renovaciones y membresías.\nUna vez que tengas tu cuenta de Discord lista, mira el siguiente video:\nhttps://youtu.be/-gqr65IaGFg?si=6PuU9-gy4nFiCZfX\n\n⚠️ Importante\nNo intentes acceder al servidor antes de completar estos pasos.\n\nUna vez finalizados ambos pasos, podrás continuar con el proceso de activación.\n\nNos vemos dentro de la comunidad.\nNAZA Trading Academy\nSoporte: ${SUPPORT_EMAIL}`;
+}
+
+// Función reutilizable: la usan tanto la ruta manual /send-info-email
+// como el webhook automático /webhook/whop
+async function sendInfoEmail(email, name) {
+  if (!SENDGRID_API_KEY) throw new Error('SENDGRID_API_KEY no configurada');
+  const html = buildInfoEmailHtml({ name });
+  const text = buildInfoEmailText({ name });
+  await sgMail.send({
+    to: email,
+    from: FROM_EMAIL,
+    subject: '¡Bienvenido a NAZA Trading Academy! — Primeros pasos',
+    text,
+    html
+  });
+  console.log('✅ Info email enviado a:', email);
+}
+
+// ================= Crear membresía + notificar (reutilizable)
+// Esta es la MISMA lógica que ya usaba /create-membership. La separamos en una
+// función para que tanto esa ruta como el nuevo webhook de PayPal la puedan usar
+// sin duplicar código.
+async function createMembershipRecord({ name, email, plan, discordId = null }) {
+  let claim = null;
+  let inserted = null;
+  const maxAttempts = 6;
+  for (let i = 0; i < maxAttempts; i++) {
+    claim = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    const nowIso = new Date().toISOString();
+    const expires_at = calculateExpiryDate(plan);
+    const row = {
+      claim, name, email, plan, discord_id: discordId || null, created_at: nowIso,
+      expires_at, expires_at_ts: expires_at, active: true, used: false, revoked_at: null, redeemed_at: null, role_removed: false
+    };
+    const { data, error } = await supabase.from('memberships').insert([row]).select().limit(1);
+    if (error) {
+      const msg = (error.message || '').toLowerCase();
+      console.warn('Error insert membership attempt', i + 1, error);
+      if (msg.includes('duplicate') || msg.includes('unique') || msg.includes('already exists')) {
+        continue;
+      } else {
+        throw error;
+      }
+    } else {
+      inserted = Array.isArray(data) && data.length > 0 ? data[0] : (data || row);
+      break;
+    }
+  }
+  if (!inserted) throw new Error('No se pudo generar un claim único.');
+  return inserted;
+}
+
+async function createMembershipAndNotify({ name, email, plan, discordId = null }) {
+  const inserted = await createMembershipRecord({ name, email, plan, discordId });
+
+  sendWelcomeEmail(inserted.email, inserted.name, inserted.plan, null, null, {}, inserted.claim)
+    .then(() => console.log('Email de bienvenida enviado (async)'))
+    .catch(err => console.error('Error enviando welcome email:', err));
+
+  if (discordId) {
+    const roleId = getRoleIdForPlan(inserted.plan);
+    if (roleId) assignDiscordRole(discordId, roleId).catch(err => console.error('assignDiscordRole err:', err));
+  }
+
+  return inserted;
+}
+
+// ================= ROUTES
+
+// Health
+app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// ================= WEBHOOK DE PAYPAL (nuevo)
+// PayPal llama a esta URL cuando se completa un pago. Como los "Payment Links"
+// simples no indican directamente qué producto se compró, distinguimos el plan
+// por el MONTO exacto cobrado (240 = 6 meses, 390 = 1 año).
+app.post('/webhook/paypal', async (req, res) => {
+  let event;
+  try {
+    event = JSON.parse(req.rawBody || '{}');
+  } catch (err) {
+    console.error('❌ Webhook PayPal: el body no es JSON válido');
+    return res.status(400).send('invalid body');
+  }
+
+  try {
+    const accessToken = await getPaypalAccessToken();
+    const verified = await verifyPaypalWebhookSignature(req, event, accessToken);
+    if (!verified) {
+      console.error('❌ Firma de webhook PayPal inválida');
+      return res.status(400).send('invalid signature');
+    }
+  } catch (err) {
+    console.error('Error verificando webhook de PayPal:', err);
+    return res.status(500).send('verification error');
+  }
+
+  // Respondemos rápido; PayPal reintenta si no le contestamos pronto.
+  res.status(200).send('OK');
+
+  try {
+    console.log('📩 Webhook PayPal recibido:', event.event_type);
+
+    if (event.event_type !== 'PAYMENT.CAPTURE.COMPLETED') {
+      console.log('Evento PayPal ignorado (no es un pago completado):', event.event_type);
+      return;
+    }
+
+    const resource = event.resource || {};
+    const amountValue = parseFloat(
+      resource.amount?.value ?? resource.seller_receivable_breakdown?.gross_amount?.value ?? '0'
+    );
+    const currency = resource.amount?.currency_code || 'USD';
+
+    const plan = getPaypalPlanByAmount(amountValue, currency);
+    if (!plan) {
+      console.warn(`⚠️ Pago de PayPal por ${amountValue} ${currency} no coincide con ningún plan conocido (capture id: ${resource.id}). Revisar manualmente.`);
+      return;
+    }
+
+    const email = resource.payer?.email_address || null;
+    const givenName = resource.payer?.name?.given_name || '';
+    const surname = resource.payer?.name?.surname || '';
+    const name = `${givenName} ${surname}`.trim() || 'usuario';
+
+    if (!email) {
+      console.warn(`⚠️ Pago de PayPal (${plan}) sin email de comprador en el payload (capture id: ${resource.id}). Revisar manualmente en el dashboard de PayPal.`);
+      return;
+    }
+
+    console.log(`📩 PayPal payment.capture.completed -> plan=${plan} email=${email} monto=${amountValue}`);
+
+    // ---- Meta CAPI: avisamos a Meta que esta persona compró de verdad ----
+    // Se manda en paralelo (no bloquea ni puede romper lo demás: solo loguea si falla).
+    sendMetaPurchaseEvent({
+      email,
+      value: amountValue,
+      currency,
+      eventId: resource.id, // el id de la captura de PayPal, sirve para no duplicar si se reintenta el webhook
+      contentName: plan
+    }).catch(err => console.error('sendMetaPurchaseEvent (PayPal) err:', err));
+
+    await createMembershipAndNotify({ name, email, plan });
+  } catch (err) {
+    console.error('Error procesando evento de PayPal:', err);
+  }
+});
+
+// ================= WEBHOOK DE WHOP (nuevo)
+// Whop llama automáticamente a esta URL cuando alguien paga.
+// Verificamos la firma para asegurarnos que es realmente Whop quien avisa,
+// y si el pago fue exitoso, mandamos el correo de "primeros pasos".
+app.post('/webhook/whop', async (req, res) => {
+  if (!verifyWhopSignature(req)) {
+    console.error('❌ Firma de webhook Whop inválida o WHOP_WEBHOOK_SECRET no configurado');
+    return res.status(400).send('invalid signature');
+  }
+
+  // Respondemos rápido; Whop espera un 2xx pronto. Procesamos después.
+  res.status(200).send('OK');
+
+  try {
+    const event = JSON.parse(req.rawBody);
+    console.log('📩 Webhook Whop recibido:', event.type);
+
+    if (event.type === 'payment.succeeded') {
+      const data = event.data || {};
+
+      // DIAGNÓSTICO TEMPORAL: logueamos el payload completo la primera vez
+      // que llega un pago real, para confirmar el nombre exacto del campo
+      // del monto/moneda (varía según cómo Whop arma el evento). Una vez
+      // confirmado, se puede quitar este log o dejarlo, no afecta nada.
+      console.log('🔎 DEBUG payload completo payment.succeeded (Whop):', JSON.stringify(event, null, 2));
+
+      const email = data.user?.email || null;
+      const name = data.user?.name || data.user?.username || 'usuario';
+
+      // Intentamos varios nombres de campo comunes para el monto de Whop.
+      // Whop suele mandar el monto en CENTAVOS en "final_amount" o "amount".
+      const rawAmount =
+        data.final_amount ?? data.amount ?? data.total ?? data.subtotal ?? null;
+      const currency = (data.currency || 'USD').toString().toUpperCase();
+      // Si el número parece venir en centavos (ej. 5900 en vez de 59.00), lo dividimos.
+      // Esto es una heurística mientras confirmamos el campo real en el log de arriba.
+      let amountValue = 0;
+      if (rawAmount !== null && rawAmount !== undefined) {
+        const n = Number(rawAmount);
+        amountValue = Number.isFinite(n) ? (n > 1000 ? n / 100 : n) : 0;
+      }
+      // Respaldo: si no se pudo detectar ningún monto en el payload, usamos
+      // el precio fijo del plan mensual ($59 por defecto, o WHOP_MENSUAL_PRICE
+      // si lo cambiaste), para que Meta siempre reciba un valor correcto.
+      if (!amountValue) {
+        amountValue = WHOP_MENSUAL_PRICE;
+        console.log(`ℹ️ No se detectó el monto en el payload de Whop, usando respaldo fijo: $${WHOP_MENSUAL_PRICE}`);
+      }
+
+      if (email) {
+        // ---- Meta CAPI: avisamos a Meta que esta persona compró de verdad ----
+        sendMetaPurchaseEvent({
+          email,
+          value: amountValue,
+          currency,
+          eventId: data.id || event.id || undefined,
+          contentName: 'plan_mensual' // Whop en tu flujo actual solo maneja el plan mensual
+        }).catch(err => console.error('sendMetaPurchaseEvent (Whop) err:', err));
+
+        sendInfoEmail(email, name).catch(err => console.error('Error enviando info email (webhook whop):', err));
+      } else {
+        console.warn('⚠️ payment.succeeded sin email en el payload:', JSON.stringify(data));
+      }
+    } else {
+      console.log('Evento Whop ignorado (no es payment.succeeded):', event.type);
+    }
+  } catch (err) {
+    console.error('Error procesando evento de Whop:', err);
+  }
+});
+
+// create-membership
+app.post('/create-membership', async (req, res) => {
+  try {
+    if (!validatePasswordFromBody(req)) return res.status(401).json({ success:false, message:'password inválida' });
+    const body = req.body || {};
+    const name = (body.nombre || body.name || '').toString().trim();
+    const email = (body.email || '').toString().trim().toLowerCase();
+    const plan = (body.plan || '').toString().trim();
+    const discordId = body.discordId || body.discord_id || null;
+    if (!name || !email || !plan) return res.status(400).json({ success:false, message:'Campos requeridos: nombre, email, plan' });
+
+    let inserted;
+    try {
+      inserted = await createMembershipAndNotify({ name, email, plan, discordId });
+    } catch (err) {
+      console.error('Error creando membership vía /create-membership:', err);
+      return res.status(500).json({ success:false, message: err.message || 'No se pudo generar un claim único.' });
+    }
+
+    return res.status(201).json({ success:true, membership: { id: inserted.id || null, name: inserted.name, email: inserted.email, plan: inserted.plan, discord_id: inserted.discord_id, claim: inserted.claim, created_at: inserted.created_at, expires_at: inserted.expires_at, active: inserted.active, used: inserted.used } });
+  } catch (err) {
+    console.error('/create-membership error', err);
+    return res.status(500).json({ success:false, message:'Error interno' });
+  }
+});
+
+// redeem-claim
+app.post('/redeem-claim', async (req, res) => {
+  try {
+    if (!validatePasswordFromBody(req)) return res.status(401).json({ success:false, message:'password inválida' });
+    const { claim, discordId } = req.body || {};
+    if (!claim) return res.status(400).json({ success:false, message:'claim es requerido' });
+
+    const { data: rows, error: fetchErr } = await supabase.from('memberships').select('*').eq('claim', claim).limit(1);
+    if (fetchErr) return res.status(500).json({ success:false, message:'Error interno' });
+    if (!rows || rows.length === 0) return res.status(404).json({ success:false, message:'Claim no encontrado' });
+    const membership = rows[0];
+
+    if (membership.used === true) return res.status(400).json({ success:false, message:'Este claim ya fue usado.' });
+    if (membership.revoked_at) return res.status(400).json({ success:false, message:'Este claim fue revocado.' });
+    if (membership.discord_id) return res.status(400).json({ success:false, message:'Este claim ya está vinculado a un Discord ID.' });
+
+    const updates = { used: true, active: false, redeemed_at: new Date().toISOString() };
+    if (discordId) updates.discord_id = discordId;
+    const { data: updateData, error: updateErr } = await supabase.from('memberships').update(updates).eq('claim', claim).eq('used', false).is('discord_id', null).is('revoked_at', null).select().limit(1);
+    if (updateErr) return res.status(500).json({ success:false, message:'Error interno actualizando membership' });
+    if (!updateData || updateData.length === 0) return res.status(400).json({ success:false, message:'No se pudo canjear el claim. Probablemente ya fue usado.' });
+
+    const updatedMembership = Array.isArray(updateData) ? updateData[0] : updateData;
+
+    const finalDiscordId = discordId || updatedMembership.discord_id;
+    if (finalDiscordId) {
+      const roleId = getRoleIdForPlan(updatedMembership.plan || updatedMembership.plan_id);
+      if (roleId) {
+        await assignDiscordRole(finalDiscordId, roleId).catch(err => console.error('assignDiscordRole redeem-claim err:', err));
+      } else {
+        console.warn('No role found for plan in redeem-claim');
+      }
+    }
+
+    return res.json({ success:true, membership: updatedMembership });
+  } catch (err) {
+    console.error('/redeem-claim error', err);
+    return res.status(500).json({ success:false, message:'Error interno' });
+  }
+});
+
+// /api/auth/claim
+app.get('/api/auth/claim', async (req, res) => {
+  const token = req.query.token || req.query.state;
+  if (!token) return res.status(400).send('Token missing');
+  try {
+    const { data: rows, error } = await supabase.from('memberships').select('id,claim,used,revoked_at,discord_id').eq('claim', token).limit(1);
+    if (error) return res.status(500).send('Error interno');
+    if (!rows || rows.length === 0) return res.status(400).send('Enlace inválido. Contacta soporte.');
+    const claimRow = rows[0];
+    if (claimRow.used) return res.status(400).send('Este enlace ya fue utilizado.');
+    if (claimRow.revoked_at) return res.status(400).send('Este enlace ha sido revocado.');
+    if (claimRow.discord_id) return res.status(400).send('Este enlace ya fue vinculado a una cuenta. Contacta soporte.');
+
+    const clientId = encodeURIComponent(DISCORD_CLIENT_ID);
+    const redirectUri = encodeURIComponent(DISCORD_REDIRECT_URL);
+    const scope = encodeURIComponent('identify guilds.join');
+    const prompt = 'consent';
+    const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${encodeURIComponent(token)}&prompt=${prompt}`;
+    return res.redirect(discordAuthUrl);
+  } catch (err) {
+    console.error('/api/auth/claim error', err);
+    return res.status(500).send('Error interno');
+  }
+});
+
+// DISCORD OAUTH CALLBACK
+app.get('/discord/callback', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    console.log('DEBUG /discord/callback params', { code: !!code, state: !!state });
+    if (!code || !state) return res.status(400).send('Faltan parámetros (code o state).');
+
+    try {
+      const { data: existingRows, error: exErr } = await supabase.from('memberships').select('id,used,revoked_at,discord_id,plan').eq('claim', state).limit(1);
+      if (exErr) console.warn('Early claim check error:', exErr);
+      const existing = existingRows && existingRows.length ? existingRows[0] : null;
+      if (!existing) {
+        console.warn('Claim not found in callback:', state);
+        return res.status(400).send('Enlace inválido o expirado. Contacta soporte.');
+      }
+      if (existing.used === true || existing.revoked_at) {
+        return res.status(400).send('Este enlace ya fue utilizado o ha sido revocado.');
+      }
+      if (existing.discord_id) {
+        return res.status(400).send('Este enlace ya está vinculado a una cuenta. Contacta soporte.');
+      }
+    } catch (err) {
+      console.warn('Error verificando claim antes de token exchange:', err);
+    }
+
+    let tokenData = null;
+    try {
+      const params = new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: DISCORD_REDIRECT_URL
+      });
+      const tokenResp = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+      const status = tokenResp.status;
+      const raw = await tokenResp.text();
+      console.log('DEBUG token exchange -> status:', status, 'body start:', (raw||'').substring(0,200));
+      if (status !== 200) {
+        try {
+          const parsed = JSON.parse(raw || '{}');
+          if (parsed.error === 'invalid_grant') {
+            console.error('Token exchange invalid_grant:', parsed);
+            return res.status(400).send('Error de autorización: código inválido o expirado. Usa el enlace recibido para intentarlo nuevamente.');
+          }
+        } catch (parseErr) { }
+        return res.status(400).send('Error de autorización (token exchange). Revisa REDIRECT_URI / CLIENT_SECRET.');
+      }
+      try { tokenData = JSON.parse(raw); } catch (parseErr) {
+        console.error('Token exchange returned non-json body', parseErr);
+        return res.status(400).send('Error de autorización: respuesta inesperada de Discord.');
+      }
+      if (!tokenData || !tokenData.access_token) {
+        console.error('No access_token in tokenData', tokenData);
+        return res.status(400).send('Error de autorización: no se recibió access_token.');
+      }
+    } catch (err) {
+      console.error('Exception during token exchange', err);
+      return res.status(500).send('Error interno durante intercambio de token. Revisa logs.');
+    }
+
+    let userData = null;
+    try {
+      const userResp = await fetch('https://discord.com/api/users/@me', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+      });
+      const userText = await userResp.text();
+      try { userData = JSON.parse(userText); } catch (parseErr) {
+        console.error('Fetch user returned non-json', parseErr, userResp.status, userText.substring(0,200));
+        return res.status(400).send('Error obteniendo datos del usuario desde Discord.');
+      }
+      if (!userData || !userData.id) {
+        console.error('No user.id obtained', userData);
+        return res.status(400).send('No se pudo obtener datos del usuario desde Discord.');
+      }
+    } catch (err) {
+      console.error('Exception fetching Discord user', err);
+      return res.status(500).send('Error interno obteniendo datos del usuario desde Discord.');
+    }
+
+    const discordId = String(userData.id);
+    const discordUsername = userData.username || discordId;
+    console.log('OAuth user:', discordUsername, discordId);
+
+    try {
+      const putUrl = `https://discord.com/api/guilds/${GUILD_ID}/members/${discordId}`;
+      const putBody = { access_token: tokenData.access_token };
+      const addResp = await fetch(putUrl, {
+        method: 'PUT',
+        headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(putBody)
+      });
+      const addStatus = addResp.status;
+      const addText = await addResp.text().catch(()=>'<no-body>');
+      console.log('DEBUG add-member via OAuth -> status:', addStatus, 'body:', (addText||'').substring(0,400));
+    } catch (err) {
+      console.warn('Warning add-member via OAuth PUT failed', err);
+    }
+
+    let membership = null;
+    try {
+      const updates = { discord_id: discordId, discord_username: discordUsername, used: true, redeemed_at: new Date().toISOString(), active: true, updated_at: new Date().toISOString() };
+      const { data: updatedRows, error: updErr } = await supabase.from('memberships').update(updates).eq('claim', state).eq('used', false).is('revoked_at', null).select().limit(1);
+      if (updErr) {
+        console.error('Error updating membership in callback', updErr);
+      } else if (!updatedRows || updatedRows.length === 0) {
+        console.warn('No updatedRows after trying to mark claim used (possible race)');
+      } else {
+        membership = updatedRows[0];
+      }
+    } catch (err) {
+      console.error('Exception updating membership in callback', err);
+    }
+
+    if (!membership) {
+      try {
+        const { data: rows2 } = await supabase.from('memberships').select('*').eq('claim', state).limit(1);
+        if (rows2 && rows2.length) membership = rows2[0];
+      } catch (err) { console.warn('fetch membership fallback failed', err); }
+    }
+
+    try {
+      const planOfUser = membership ? (membership.plan || membership.plan_id) : 'plan_mensual';
+      const roleId = getRoleIdForPlan(planOfUser);
+      if (roleId) {
+        const ok = await assignDiscordRole(discordId, roleId).catch(err => { console.error('assignDiscordRole error in callback', err); return false; });
+        if (!ok) console.warn('assignDiscordRole returned false; check bot perms/role hierarchy');
+      } else {
+        console.warn('No roleId for planOfUser', planOfUser);
+      }
+    } catch (err) {
+      console.error('Exception assigning role in callback', err);
+    }
+
+    const successRedirect = FRONTEND_URL ? `${FRONTEND_URL}/gracias` : 'https://discord.gg';
+    return res.send(`
+      <!doctype html><html><head><meta charset="utf-8"><title>¡Bienvenido!</title></head>
+      <body style="font-family:Arial,Helvetica,sans-serif;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+        <div style="background:rgba(255,255,255,0.04);padding:32px;border-radius:12px;text-align:center;">
+          <h1>🎉 ¡Bienvenido!</h1>
+          <p>Tu rol ha sido asignado (si el bot tiene permisos). Serás redirigido...</p>
+          <a href="${successRedirect}" style="display:inline-block;margin-top:12px;padding:12px 20px;border-radius:8px;background:#fff;color:#111;text-decoration:none;font-weight:bold;">Ir a Discord</a>
+        </div>
+        <script>setTimeout(()=>{ window.location.href='${successRedirect}' }, 3000);</script>
+      </body></html>`);
+  } catch (err) {
+    console.error('Unexpected error in /discord/callback', err);
+    return res.status(500).send('Error procesando la autorización');
+  }
+});
+
+// ================= Expire memberships
+async function expireMemberships() {
+  try {
+    console.log('⏱️ Chequeando memberships expiradas...');
+    const nowIso = new Date().toISOString();
+    const { data: rows, error } = await supabase.from('memberships').select('*').lte('expires_at', nowIso).eq('active', true).limit(1000);
+    if (error) {
+      console.error('Error buscando expiradas:', error);
+      return;
+    }
+    if (!rows || rows.length === 0) { console.log('No expiradas en este ciclo.'); return; }
+
+    for (const m of rows) {
+      try {
+        console.log('Processing expired membership:', m.id || m.claim, 'email:', m.email);
+        const roleId = getRoleIdForPlan(m.plan || m.plan_id);
+
+        if (m.discord_id && roleId) {
+          const removed = await removeDiscordRole(m.discord_id, roleId);
+          if (removed) {
+            console.log(`Role ${roleId} removed for membership ${m.id}`);
+            await markRoleRemovedInDB(m.id);
+          } else {
+            console.warn(`Could not remove role ${roleId} for membership ${m.id}`);
+          }
+        } else {
+          console.log('No discord_id or no roleId -> skip remove role');
+        }
+
+        const updates = { active: false, revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+        const { error: updErr } = await supabase.from('memberships').update(updates).eq('id', m.id);
+        if (updErr) console.error('Error marking revoked', updErr);
+        else console.log(`Membership ${m.id} marked revoked.`);
+
+        if (m.email) {
+          await sendExpiryEmail(m).catch(e => console.error('sendExpiryEmail error', e));
+        }
+      } catch (innerErr) {
+        console.error('Error processing expired membership loop', innerErr);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error in expireMemberships', err);
+  }
+}
+
+setTimeout(() => {
+  expireMemberships().catch(err => console.error('expireMemberships startup error', err));
+  setInterval(() => expireMemberships().catch(err => console.error('expireMemberships interval error', err)), 60*1000);
+}, 3000);
+
+// ================= verify bot token at startup
+async function verifyBotTokenAtStartup() {
+  try {
+    if (!DISCORD_BOT_TOKEN) { console.warn('No DISCORD_BOT_TOKEN'); return; }
+    const resp = await fetch('https://discord.com/api/v10/users/@me', { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } });
+    const status = resp.status;
+    const body = await resp.text().catch(()=>'<no-body>');
+    console.log(`VERIFY_BOT_TOKEN -> status=${status} body=${String(body).substring(0,400)}`);
+    if (status === 200) console.log('Bot token valid');
+    else if (status === 401) console.error('Bot token invalid (401).');
+    else console.warn('Unexpected verifyBotToken status', status);
+  } catch (err) {
+    console.error('verifyBotTokenAtStartup error', err);
+  }
+}
+verifyBotTokenAtStartup();
+
+// Ruta manual (por si querés mandar el correo de info a mano alguna vez)
+app.post('/send-info-email', async (req, res) => {
+  try {
+    if (!validatePasswordFromBody(req)) return res.status(401).json({ success: false, message: 'password inválida' });
+
+    const body = req.body || {};
+    const email = (body.email || '').toString().trim().toLowerCase();
+    const name  = (body.nombre || body.name || '').toString().trim();
+
+    if (!email) return res.status(400).json({ success: false, message: 'Campo requerido: email' });
+
+    await sendInfoEmail(email, name);
+    return res.json({ success: true, message: 'Email enviado correctamente' });
+  } catch (err) {
+    console.error('/send-info-email error', err?.response?.body || err);
+    return res.status(500).json({ success: false, message: 'Error enviando email' });
+  }
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log('🚀 NAZA Bot iniciado en puerto', PORT);
+  console.log('🔔 Discord token presente?', !!DISCORD_BOT_TOKEN);
+  console.log('🔗 Supabase presente?', !!SUPABASE_URL);
+});
